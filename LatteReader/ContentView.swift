@@ -1,4 +1,5 @@
 import AVFoundation
+import AppKit
 import PDFKit
 import SwiftUI
 import UniformTypeIdentifiers
@@ -32,8 +33,6 @@ struct ContentView: View {
     @State private var speechRate = Double(AVSpeechUtteranceDefaultSpeechRate)
     @State private var errorMessage: String?
     @State private var isImporterPresented = false
-    @State private var pageInput: String = ""
-    @State private var isPagePopoverPresented = false
 
     var body: some View {
         ZStack {
@@ -65,11 +64,10 @@ struct ContentView: View {
             if piperReader.isSpeaking || piperReader.isPaused { piperReader.stop() }
         }
         .onChange(of: pdfProxy.currentPageNumber) { pageNum in
-            pageInput = "\(pageNum)"
             selectedPageID = pageNum - 1
         }
         .onChange(of: pdfProxyPage.currentPageNumber) { pageNum in
-            pageInput = "\(pageNum)"
+            selectedPageID = pageNum - 1
         }
         .fileImporter(
             isPresented: $isImporterPresented,
@@ -168,36 +166,7 @@ struct ContentView: View {
                                 .foregroundColor(.cream)
                                 .frame(minWidth: 30, alignment: .trailing)
                                 .onTapGesture {
-                                    pageInput = "\(activeProxy.currentPageNumber)"
-                                    isPagePopoverPresented = true
-                                }
-                                .popover(isPresented: $isPagePopoverPresented, arrowEdge: .bottom) {
-                                    VStack(spacing: 12) {
-                                        Text("Go to page")
-                                            .font(.headline)
-                                            .foregroundColor(.primary)
-                                        TextField("Page number", text: $pageInput)
-                                            .textFieldStyle(.roundedBorder)
-                                            .frame(width: 120)
-                                            .onSubmit {
-                                                goToPage(from: pageInput, totalPages: pdf.pageCount)
-                                                isPagePopoverPresented = false
-                                            }
-                                        HStack(spacing: 8) {
-                                            Button("Cancel") {
-                                                isPagePopoverPresented = false
-                                            }
-                                            .keyboardShortcut(.escape, modifiers: [])
-                                            Button("Go") {
-                                                goToPage(from: pageInput, totalPages: pdf.pageCount)
-                                                isPagePopoverPresented = false
-                                            }
-                                            .keyboardShortcut(.return, modifiers: [])
-                                            .buttonStyle(.borderedProminent)
-                                        }
-                                    }
-                                    .padding(16)
-                                    .frame(width: 180)
+                                    promptForPage(in: pdf.pageCount)
                                 }
                             Text("of \(pdf.pageCount)")
                                 .foregroundStyle(Color.creamMuted)
@@ -611,12 +580,29 @@ struct ContentView: View {
         }
     }
 
-    private func goToPage(from input: String, totalPages: Int) {
-        guard let pageNum = Int(input),
-              pageNum > 0,
-              pageNum <= totalPages
-        else { return }
-        activeProxy.goToPage(pageNum)
-        isPagePopoverPresented = false
+    /// Native AppKit alert — works regardless of SwiftUI window quirks.
+    private func promptForPage(in totalPages: Int) {
+        let alert = NSAlert()
+        alert.messageText = "Go to page"
+        alert.informativeText = "Enter a page number (1–\(totalPages))"
+        alert.addButton(withTitle: "Go")
+        alert.addButton(withTitle: "Cancel")
+
+        let textField = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
+        textField.stringValue = "\(activeProxy.currentPageNumber)"
+        textField.bezelStyle = .roundedBezel
+        alert.accessoryView = textField
+
+        textField.becomeFirstResponder()
+
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            let input = textField.stringValue.trimmingCharacters(in: .whitespaces)
+            guard let pageNum = Int(input),
+                  pageNum > 0,
+                  pageNum <= totalPages
+            else { return }
+            activeProxy.goToPage(pageNum)
+        }
     }
 }
