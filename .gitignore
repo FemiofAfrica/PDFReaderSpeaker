@@ -1,0 +1,24 @@
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# macOS
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Debug symbols
+*.dSYM/
+*.dSYM.zip
+
+# Xcode
+*.xcworkspace/
+xcuserdata/
+DerivedData/
+
+# Editor
+.idea/
+.vscode/
+*.sw?
