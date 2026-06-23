@@ -32,6 +32,7 @@ struct ContentView: View {
     @State private var speechRate = Double(AVSpeechUtteranceDefaultSpeechRate)
     @State private var errorMessage: String?
     @State private var isImporterPresented = false
+    @State private var pageInput: String = ""
 
     var body: some View {
         ZStack {
@@ -63,7 +64,11 @@ struct ContentView: View {
             if piperReader.isSpeaking || piperReader.isPaused { piperReader.stop() }
         }
         .onChange(of: pdfProxy.currentPageNumber) { pageNum in
+            pageInput = "\(pageNum)"
             selectedPageID = pageNum - 1
+        }
+        .onChange(of: pdfProxyPage.currentPageNumber) { pageNum in
+            pageInput = "\(pageNum)"
         }
         .fileImporter(
             isPresented: $isImporterPresented,
@@ -157,19 +162,23 @@ struct ContentView: View {
                         HStack {
                             Text("Page").foregroundStyle(Color.creamMuted)
                             Spacer()
-                            TextField("", value: Binding(
-                                get: { activeProxy.currentPageNumber },
-                                set: { newVal in
-                                    let clamped = max(1, min(newVal, pdf.pageCount))
-                                    activeProxy.goToPage(clamped)
+                            TextField("", text: $pageInput)
+                                .frame(width: 54)
+                                .textFieldStyle(.roundedBorder)
+                                .multilineTextAlignment(.trailing)
+                                .fontWeight(.medium)
+                                .foregroundColor(.black)
+                                .controlSize(.small)
+                                .onSubmit {
+                                    guard let pageNum = Int(pageInput),
+                                          pageNum > 0,
+                                          pageNum <= pdf.pageCount
+                                    else {
+                                        pageInput = "\(activeProxy.currentPageNumber)"
+                                        return
+                                    }
+                                    activeProxy.goToPage(pageNum)
                                 }
-                            ), format: .number)
-                            .textFieldStyle(.roundedBorder)
-                            .multilineTextAlignment(.trailing)
-                            .frame(width: 54)
-                            .fontWeight(.medium)
-                            .foregroundColor(.black)
-                            .controlSize(.small)
                             Text("of \(pdf.pageCount)")
                                 .foregroundStyle(Color.creamMuted)
                         }
