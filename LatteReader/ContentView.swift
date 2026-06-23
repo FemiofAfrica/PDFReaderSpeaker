@@ -76,10 +76,10 @@ struct ContentView: View {
     private var header: some View {
         HStack(alignment: .center, spacing: 16) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("PDF Reader Speaker")
+                Text("LatteReader")
                     .font(.largeTitle.bold())
                     .foregroundColor(.cream)
-                Text("Open a PDF, extract selectable text, and read it aloud with macOS voices.")
+                Text("Open a PDF, extract selectable text, and listen.")
                     .foregroundStyle(Color.creamMuted)
             }
             Spacer()
@@ -116,7 +116,7 @@ struct ContentView: View {
             Text("Choose a PDF to begin")
                 .font(.title2.bold())
                 .foregroundColor(.cream)
-            Text("Open a PDF, extract selectable text, and read it aloud with Piper neural voices or macOS system voices.")
+            Text("Open a PDF, extract selectable text, and listen with Piper neural voices or macOS system voices.")
                 .foregroundStyle(Color.creamMuted)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 440)
@@ -158,17 +158,18 @@ struct ContentView: View {
                             Text("Page").foregroundStyle(Color.creamMuted)
                             Spacer()
                             TextField("", value: Binding(
-                                get: { pdfProxy.currentPageNumber },
+                                get: { activeProxy.currentPageNumber },
                                 set: { newVal in
                                     let clamped = max(1, min(newVal, pdf.pageCount))
-                                    pdfProxy.goToPage(clamped)
+                                    activeProxy.goToPage(clamped)
                                 }
                             ), format: .number)
-                            .textFieldStyle(.plain)
+                            .textFieldStyle(.roundedBorder)
                             .multilineTextAlignment(.trailing)
-                            .frame(width: 40)
+                            .frame(width: 54)
                             .fontWeight(.medium)
-                            .foregroundColor(.cream)
+                            .foregroundColor(.black)
+                            .controlSize(.small)
                             Text("of \(pdf.pageCount)")
                                 .foregroundStyle(Color.creamMuted)
                         }

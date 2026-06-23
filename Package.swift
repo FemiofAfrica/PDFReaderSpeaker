@@ -2,17 +2,17 @@
 import PackageDescription
 
 let package = Package(
-    name: "PDFReaderSpeaker",
+    name: "LatteReader",
     platforms: [
         .macOS(.v13)
     ],
     products: [
-        .executable(name: "PDFReaderSpeaker", targets: ["PDFReaderSpeaker"])
+        .executable(name: "LatteReader", targets: ["LatteReader"])
     ],
     targets: [
         .executableTarget(
-            name: "PDFReaderSpeaker",
-            path: "PDFReaderSpeaker"
+            name: "LatteReader",
+            path: "LatteReader"
         )
     ]
 )

@@ -1,7 +1,7 @@
 import SwiftUI
 
 @main
-struct PDFReaderSpeakerApp: App {
+struct LatteReaderApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()

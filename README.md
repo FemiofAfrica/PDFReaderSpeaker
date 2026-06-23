@@ -1,8 +1,8 @@
-# PDF Reader Speaker
+# LatteReader
 
-A premium macOS SwiftUI app that opens PDFs, extracts text, and reads them aloud using **Piper neural TTS** or **macOS system voices**.
+A warm, premium macOS app that opens PDFs and reads them aloud using **Piper neural TTS** or **macOS system voices**.
 
-Built with native SwiftUI + PDFKit, designed with a warm, earthy chocolate-brown aesthetic.
+Built with native SwiftUI + PDFKit. Wrapped in a cozy chocolate-brown aesthetic — like your favorite coffee shop, but for documents.
 
 ## Features
 
@@ -21,8 +21,6 @@ Built with native SwiftUI + PDFKit, designed with a warm, earthy chocolate-brown
 
 ## Parser Options
 
-Three parser modes are available:
-
 | Mode | Behaviour |
 |------|-----------|
 | **Auto: PDFKit, then Liteparse** | Uses PDFKit first; falls back to Liteparse CLI for scanned/image PDFs (if installed) |
@@ -33,19 +31,17 @@ Three parser modes are available:
 
 ## Build & Run
 
-### From the command line
-
 ```bash
 swift run
 ```
 
-### From Xcode
+Or open in Xcode:
 
 ```bash
 open Package.swift
 ```
 
-Then select the `PDFReaderSpeaker` scheme and press **Run**.
+Then select the `LatteReader` scheme and press **Run**.
 
 ## System Requirements
 
@@ -71,12 +67,12 @@ This is a local development app and is not notarized. If you export or run a bui
 ## Project Structure
 
 ```
-PDFReaderSpeaker/
+LatteReader/
 ├── Package.swift                  # SwiftPM manifest
 ├── README.md
 ├── .gitignore
-└── PDFReaderSpeaker/
-    ├── PDFReaderSpeakerApp.swift  # App entry point
+└── LatteReader/
+    ├── LatteReaderApp.swift       # App entry point
     ├── ContentView.swift          # Main UI (sidebar, PDF view, controls)
     ├── Theme.swift                # Color palette & ambient background
     ├── PDFKitView.swift           # PDFKit NSViewRepresentable wrapper
