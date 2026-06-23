@@ -162,15 +162,10 @@ struct ContentView: View {
                         HStack {
                             Text("Page").foregroundStyle(Color.creamMuted)
                             Spacer()
-                            TextField("", text: $pageInput)
-                                .frame(width: 54)
-                                .textFieldStyle(.roundedBorder)
-                                .multilineTextAlignment(.trailing)
-                                .fontWeight(.medium)
-                                .foregroundColor(.black)
-                                .controlSize(.small)
-                                .onSubmit {
-                                    guard let pageNum = Int(pageInput),
+                            PageField(
+                                text: pageInput,
+                                onSubmit: { input in
+                                    guard let pageNum = Int(input),
                                           pageNum > 0,
                                           pageNum <= pdf.pageCount
                                     else {
@@ -179,6 +174,8 @@ struct ContentView: View {
                                     }
                                     activeProxy.goToPage(pageNum)
                                 }
+                            )
+                            .frame(width: 54, height: 22)
                             Text("of \(pdf.pageCount)")
                                 .foregroundStyle(Color.creamMuted)
                         }

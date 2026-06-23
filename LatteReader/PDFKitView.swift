@@ -170,3 +170,52 @@ extension PDFKitView {
         var lastPage: Int = 0
     }
 }
+
+// MARK: - NSTextField Wrapper (reliable macOS page input)
+
+/// Wraps NSTextField in NSViewRepresentable to work around SwiftUI
+/// TextField focus issues on macOS (hiddenTitleBar + GroupBox + .ultraThinMaterial).
+struct PageField: NSViewRepresentable {
+    let text: String
+    let onSubmit: (String) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onSubmit: onSubmit)
+    }
+
+    func makeNSView(context: Context) -> NSTextField {
+        let field = NSTextField()
+        field.stringValue = text
+        field.bezelStyle = .roundedBezel
+        field.alignment = .right
+        field.font = NSFont.systemFont(ofSize: NSFont.systemFontSize(for: .small), weight: .medium)
+        field.textColor = .black
+        field.target = context.coordinator
+        field.action = #selector(Coordinator.commit)
+        field.refusesFirstResponder = false
+        return field
+    }
+
+    func updateNSView(_ nsView: NSTextField, context: Context) {
+        let isEditing = nsView.window?.firstResponder == nsView.currentEditor()
+        if nsView.stringValue != text, !isEditing {
+            nsView.stringValue = text
+        }
+        // Update the coordinator's closure in case it changed
+        context.coordinator.onSubmit = onSubmit
+    }
+}
+
+extension PageField {
+    final class Coordinator: NSObject {
+        var onSubmit: (String) -> Void
+
+        init(onSubmit: @escaping (String) -> Void) {
+            self.onSubmit = onSubmit
+        }
+
+        @objc func commit(_ sender: NSTextField) {
+            onSubmit(sender.stringValue)
+        }
+    }
+}
