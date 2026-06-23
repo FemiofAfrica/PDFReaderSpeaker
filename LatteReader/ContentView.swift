@@ -33,6 +33,7 @@ struct ContentView: View {
     @State private var errorMessage: String?
     @State private var isImporterPresented = false
     @State private var pageInput: String = ""
+    @State private var isPagePopoverPresented = false
 
     var body: some View {
         ZStack {
@@ -162,20 +163,42 @@ struct ContentView: View {
                         HStack {
                             Text("Page").foregroundStyle(Color.creamMuted)
                             Spacer()
-                            PageField(
-                                text: pageInput,
-                                onSubmit: { input in
-                                    guard let pageNum = Int(input),
-                                          pageNum > 0,
-                                          pageNum <= pdf.pageCount
-                                    else {
-                                        pageInput = "\(activeProxy.currentPageNumber)"
-                                        return
-                                    }
-                                    activeProxy.goToPage(pageNum)
+                            Text("\(activeProxy.currentPageNumber)")
+                                .fontWeight(.medium)
+                                .foregroundColor(.cream)
+                                .frame(minWidth: 30, alignment: .trailing)
+                                .onTapGesture {
+                                    pageInput = "\(activeProxy.currentPageNumber)"
+                                    isPagePopoverPresented = true
                                 }
-                            )
-                            .frame(width: 54, height: 22)
+                                .popover(isPresented: $isPagePopoverPresented, arrowEdge: .bottom) {
+                                    VStack(spacing: 12) {
+                                        Text("Go to page")
+                                            .font(.headline)
+                                            .foregroundColor(.primary)
+                                        TextField("Page number", text: $pageInput)
+                                            .textFieldStyle(.roundedBorder)
+                                            .frame(width: 120)
+                                            .onSubmit {
+                                                goToPage(from: pageInput, totalPages: pdf.pageCount)
+                                                isPagePopoverPresented = false
+                                            }
+                                        HStack(spacing: 8) {
+                                            Button("Cancel") {
+                                                isPagePopoverPresented = false
+                                            }
+                                            .keyboardShortcut(.escape, modifiers: [])
+                                            Button("Go") {
+                                                goToPage(from: pageInput, totalPages: pdf.pageCount)
+                                                isPagePopoverPresented = false
+                                            }
+                                            .keyboardShortcut(.return, modifiers: [])
+                                            .buttonStyle(.borderedProminent)
+                                        }
+                                    }
+                                    .padding(16)
+                                    .frame(width: 180)
+                                }
                             Text("of \(pdf.pageCount)")
                                 .foregroundStyle(Color.creamMuted)
                         }
@@ -586,5 +609,14 @@ struct ContentView: View {
         case .liteparse:
             return "Requires the local lit command from run-llama/liteparse."
         }
+    }
+
+    private func goToPage(from input: String, totalPages: Int) {
+        guard let pageNum = Int(input),
+              pageNum > 0,
+              pageNum <= totalPages
+        else { return }
+        activeProxy.goToPage(pageNum)
+        isPagePopoverPresented = false
     }
 }
