@@ -41,6 +41,15 @@ final class PDFViewProxy: ObservableObject {
         syncScale()
     }
 
+    /// Set a specific zoom percentage (e.g. 82 → 82%).
+    func setZoomPercent(_ percent: Int) {
+        guard let pdfView else { return }
+        let clamped = max(10, min(percent, 3200))
+        pdfView.autoScales = false
+        pdfView.scaleFactor = CGFloat(clamped) / 100.0
+        syncScale()
+    }
+
     // MARK: - Internal
 
     fileprivate func syncScale() {
@@ -152,13 +161,19 @@ struct PDFKitView: NSViewRepresentable {
         // Handle proxy activation changes
         if isActive { proxy.pdfView = nsView }
 
-        // Handle page navigation
+        // Handle page navigation — only if we're not already on this page
         guard context.coordinator.lastPage != currentPage else { return }
         context.coordinator.lastPage = currentPage
 
         guard currentPage >= 0,
               currentPage < (nsView.document?.pageCount ?? 0)
         else { return }
+        // Check if PDFView already shows this page (e.g., from a proxy animation)
+        if let currentPDFPage = nsView.currentPage,
+           let currentIndex = nsView.document?.index(for: currentPDFPage),
+           currentIndex == currentPage {
+            return
+        }
         if let page = nsView.document?.page(at: currentPage) {
             nsView.go(to: page)
         }

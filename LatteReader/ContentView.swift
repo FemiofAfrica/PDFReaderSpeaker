@@ -48,7 +48,6 @@ struct ContentView: View {
                 controls
                     .background(.ultraThinMaterial)
             }
-            .background(WindowResizeEnforcer())
         }
         .onChange(of: selectedVoiceIdentifier) { newVoice in
             guard speechReader.isSpeaking || speechReader.isPaused else { return }

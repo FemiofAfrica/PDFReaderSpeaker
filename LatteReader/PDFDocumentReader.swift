@@ -103,8 +103,10 @@ final class LiteparseCLITextParser: PDFTextParsing {
 
     static func isAvailable() -> Bool {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["which", "lit"]
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = ["-c", "which lit"]
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
 
         do {
             try process.run()
