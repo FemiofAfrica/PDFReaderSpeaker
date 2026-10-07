@@ -22,6 +22,10 @@ struct ContentView: View {
     )
     @StateObject private var pdfProxy = PDFViewProxy()
     @StateObject private var pdfProxyPage = PDFViewProxy()
+    @StateObject private var playbackControls = PlaybackControls()
+    @StateObject private var errorHandler = ErrorHandler()
+    
+    private let voiceChangeDebouncer = Debouncer(delay: 0.5)
 
     @State private var selectedVoiceEngine: VoiceEngine = .kokoro
 
@@ -121,21 +125,56 @@ struct ContentView: View {
             default:
                 break
             }
+            playbackControls.updateSkipCapabilities()
         }
         .onAppear {
             // Pre-warm the Kokoro worker so the model is loaded
             // before the user presses Play.
             kokoroReader.warmUp()
-            // AppKit-level ⌘⌥Q monitor for queueing selections.
+            // Set up playback controls
+            playbackControls.setEngines(kokoro: kokoroReader, piper: piperReader)
+            playbackControls.setActiveEngine(selectedVoiceEngine)
+            
+            // AppKit-level keyboard monitors for shortcuts
             // Must use a local monitor — SwiftUI shortcuts are unreliable
             // in debug builds and conflict with system ⌘Q / ⌘⇧Q.
             let monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                // ⌘⌥Q — Queue selection
                 if event.modifierFlags.contains(.command),
                    event.modifierFlags.contains(.option),
                    event.charactersIgnoringModifiers?.lowercased() == "q" {
                     queueCurrentSelection()
                     return nil
                 }
+                
+                // ⌘← — Skip backward sentence
+                if event.modifierFlags.contains(.command),
+                   event.keyCode == 123 { // Left arrow
+                    playbackControls.skipBackwardSentence()
+                    return nil
+                }
+                
+                // ⌘→ — Skip forward sentence
+                if event.modifierFlags.contains(.command),
+                   event.keyCode == 124 { // Right arrow
+                    playbackControls.skipForwardSentence()
+                    return nil
+                }
+                
+                // ⌥← — Skip backward 15s
+                if event.modifierFlags.contains(.option),
+                   event.keyCode == 123 { // Left arrow
+                    playbackControls.skipBackwardTime()
+                    return nil
+                }
+                
+                // ⌥→ — Skip forward 15s
+                if event.modifierFlags.contains(.option),
+                   event.keyCode == 124 { // Right arrow
+                    playbackControls.skipForwardTime()
+                    return nil
+                }
+                
                 return event
             }
             keyMonitor = monitor
@@ -143,9 +182,10 @@ struct ContentView: View {
         .onDisappear {
             if let m = keyMonitor { NSEvent.removeMonitor(m) }
         }
-        .onChange(of: selectedVoiceEngine) { _ in
+        .onChange(of: selectedVoiceEngine) { newEngine in
             if kokoroReader.isSpeaking || kokoroReader.isPaused { kokoroReader.stop() }
             if piperReader.isSpeaking || piperReader.isPaused { piperReader.stop() }
+            playbackControls.setActiveEngine(newEngine)
         }
         .fileImporter(
             isPresented: $isImporterPresented,
@@ -153,6 +193,7 @@ struct ContentView: View {
             allowsMultipleSelection: false,
             onCompletion: handleImport
         )
+        .errorAlert(errorHandler: errorHandler)
     }
 
     // MARK: - Top Bar
@@ -672,6 +713,18 @@ struct ContentView: View {
                 }
                 .buttonStyle(TransportBtnStyle())
 
+                // Skip backward (sentence)
+                Button {
+                    playbackControls.skipBackwardSentence()
+                } label: {
+                    Image(systemName: "backward.end.fill")
+                        .font(.system(size: 11))
+                        .foregroundColor(.espresso)
+                }
+                .buttonStyle(TransportBtnStyle())
+                .disabled(!playbackControls.canSkipBackward)
+                .help("⌘← — Previous sentence")
+
                 // Queue selection (test)
                 Button { queueCurrentSelection() } label: {
                     Text("Q")
@@ -724,11 +777,25 @@ struct ContentView: View {
                     }
                 }
                 .buttonStyle(TransportBtnStyle())
+                
+                // Skip forward (sentence)
+                Button {
+                    playbackControls.skipForwardSentence()
+                } label: {
+                    Image(systemName: "forward.end.fill")
+                        .font(.system(size: 11))
+                        .foregroundColor(.espresso)
+                }
+                .buttonStyle(TransportBtnStyle())
+                .disabled(!playbackControls.canSkipForward)
+                .help("⌘→ — Next sentence")
             }
 
             // Waveform
-            WaveformView(playing: isPlaying, progress: $playbackProgress)
-                .frame(maxWidth: .infinity)
+            WaveformView(playing: isPlaying, progress: $playbackProgress, onSeek: { progress in
+                handleWaveformSeek(progress)
+            })
+            .frame(maxWidth: .infinity)
 
             // Time / chapter
             VStack(spacing: 1) {
@@ -817,7 +884,12 @@ struct ContentView: View {
                 fallbackPolicy: speakerFallbackPolicy
             )
             if !kokoroReader.availability.isAvailable {
-                analysisMessage = "Kokoro is not ready. Using Piper fallback if a Piper model is installed."
+                errorHandler.handleVoiceEngineError(engine: .kokoro, availability: kokoroReader.availability) {
+                    // Fall back to Piper
+                    selectedVoiceEngine = .piper
+                    startEngine(text: text, rate: playbackSpeed)
+                }
+                return
             }
             selectedVoiceEngine = .kokoro
             kokoroReader.start(segments: segments, rate: playbackSpeed)
@@ -889,6 +961,13 @@ struct ContentView: View {
         }
         isPlaying = false
         playbackProgress = 0
+    }
+    
+    private func handleWaveformSeek(_ progress: Double) {
+        let reader = selectedVoiceEngine == .kokoro ? kokoroReader : piperReader
+        let targetTime = progress * reader.duration
+        reader.seek(to: targetTime)
+        playbackProgress = progress
     }
 
     private var elapsedString: String {
@@ -973,7 +1052,8 @@ struct ContentView: View {
 
             guard let document = PDFDocument(url: url) else {
                 if canAccess { url.stopAccessingSecurityScopedResource() }
-                throw PDFReaderError.cannotOpen
+                errorHandler.handlePDFError(.cannotOpen)
+                return
             }
             pdfDocument = document
             errorMessage = nil
@@ -1010,7 +1090,11 @@ struct ContentView: View {
                     }
                 } catch {
                     await MainActor.run {
-                        errorMessage = "Text extraction: \(error.localizedDescription)"
+                        if let pdfError = error as? PDFReaderError {
+                            errorHandler.handlePDFError(pdfError)
+                        } else {
+                            errorMessage = "Text extraction: \(error.localizedDescription)"
+                        }
                         isParsingText = false
                     }
                 }
@@ -1019,7 +1103,11 @@ struct ContentView: View {
             loadedPDF = nil
             pdfDocument = nil
             isParsingText = false
-            errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            if let pdfError = error as? PDFReaderError {
+                errorHandler.handlePDFError(pdfError)
+            } else {
+                errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            }
         }
     }
 

@@ -381,6 +381,7 @@ struct CoffeeDial: View {
 struct WaveformView: View {
     let playing: Bool
     @Binding var progress: Double
+    var onSeek: ((Double) -> Void)?
 
     private let bars: [CGFloat] = {
         var out: [CGFloat] = []
@@ -395,6 +396,7 @@ struct WaveformView: View {
     }()
 
     @State private var dragWidth: CGFloat = 0
+    @State private var isDragging = false
 
     var body: some View {
         GeometryReader { geo in
@@ -434,10 +436,25 @@ struct WaveformView: View {
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { gesture in
+                        isDragging = true
                         let p = gesture.location.x / dragWidth
                         progress = min(1, max(0, p))
                     }
+                    .onEnded { gesture in
+                        isDragging = false
+                        let p = gesture.location.x / dragWidth
+                        let finalProgress = min(1, max(0, p))
+                        progress = finalProgress
+                        onSeek?(finalProgress)
+                    }
             )
+            .onHover { hovering in
+                if hovering, onSeek != nil {
+                    NSCursor.pointingHand.push()
+                } else {
+                    NSCursor.pop()
+                }
+            }
         }
         .frame(height: 40)
         .clipShape(RoundedRectangle(cornerRadius: 8))

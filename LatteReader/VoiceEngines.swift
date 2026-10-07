@@ -53,15 +53,7 @@ final class KokoroWorker {
     private var output: FileHandle?
 
     private var executablePath: String? {
-        [
-            FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Library/Application Support/LatteReader/kokoro/kokoro-worker").path,
-            Bundle.main.resourceURL?.appendingPathComponent("kokoro/kokoro-worker").path,
-            FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".local/bin/kokoro-worker").path,
-            "/opt/homebrew/bin/kokoro-worker",
-            "/usr/local/bin/kokoro-worker"
-        ].compactMap { $0 }.first(where: FileManager.default.isExecutableFile)
+        AppConfig.findExecutable(in: AppConfig.kokoroWorkerPaths)
     }
 
     var isAvailable: Bool { executablePath != nil }
@@ -133,7 +125,7 @@ final class KokoroWorker {
         }
     }
 
-    private func ensureStarted() throws {
+    private     func ensureStarted() throws {
         if let process, process.isRunning { return }
         guard let executablePath else { throw CocoaError(.fileNoSuchFile) }
 
@@ -144,13 +136,25 @@ final class KokoroWorker {
         process.standardInput = inputPipe
         process.standardOutput = outputPipe
         process.standardError = FileHandle.nullDevice
+        
+        // Use DispatchGroup for timeout instead of process.waitUntilExit
+        let startGroup = DispatchGroup()
+        startGroup.enter()
+        
         try process.run()
 
         self.process = process
         input = inputPipe.fileHandleForWriting
         output = outputPipe.fileHandleForReading
 
-        guard let readyLine = output?.readLine(), readyLine.contains("ready") else {
+        // Read ready line with timeout
+        var readyLine: String?
+        DispatchQueue.global().async {
+            readyLine = self.output?.readLine()
+            startGroup.leave()
+        }
+        
+        if startGroup.wait(timeout: .now() + 5.0) == .timedOut || !(readyLine?.contains("ready") ?? false) {
             restart()
             throw CocoaError(.executableLoad)
         }
@@ -158,7 +162,20 @@ final class KokoroWorker {
 
     private func restart() {
         try? input?.close()
-        process?.terminate()
+        if let process, process.isRunning {
+            process.terminate()
+            // Wait briefly for graceful termination
+            let terminateGroup = DispatchGroup()
+            terminateGroup.enter()
+            DispatchQueue.global().async {
+                process.waitUntilExit()
+                terminateGroup.leave()
+            }
+            // Force kill if it doesn't terminate within 2 seconds
+            if terminateGroup.wait(timeout: .now() + 2.0) == .timedOut {
+                process.interrupt()
+            }
+        }
         process = nil
         input = nil
         output = nil
@@ -179,15 +196,7 @@ private extension FileHandle {
 
 struct KokoroVoiceEngine: VoiceSynthesizer {
     private var workerPath: String? {
-        [
-            FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Library/Application Support/LatteReader/kokoro/kokoro-worker").path,
-            Bundle.main.resourceURL?.appendingPathComponent("kokoro/kokoro-worker").path,
-            FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".local/bin/kokoro-worker").path,
-            "/opt/homebrew/bin/kokoro-worker",
-            "/usr/local/bin/kokoro-worker"
-        ].compactMap { $0 }.first(where: FileManager.default.isExecutableFile)
+        AppConfig.findExecutable(in: AppConfig.kokoroWorkerPaths)
     }
 
     private var modelURL: URL? {
@@ -222,9 +231,8 @@ struct KokoroVoiceEngine: VoiceSynthesizer {
 
 struct PiperVoiceEngine: VoiceSynthesizer {
     var availability: VoiceEngineAvailability {
-        guard FileManager.default.isExecutableFile(atPath: "/opt/homebrew/bin/piper")
-            || FileManager.default.isExecutableFile(atPath: "/usr/local/bin/piper") else {
-            return VoiceEngineAvailability(isAvailable: false, message: "Install Piper and place a .onnx voice in ~/Library/Application Support/piper-voices/.")
+        guard AppConfig.findExecutable(in: AppConfig.piperExecutablePaths) != nil else {
+            return VoiceEngineAvailability(isAvailable: false, message: "Piper not found. Install via Homebrew or place in bundle.")
         }
         guard !LocalVoiceAssetLocator.onnxFiles(in: LocalVoiceAssetLocator.piperRoots).isEmpty else {
             return VoiceEngineAvailability(isAvailable: false, message: "Place a Piper .onnx voice in ~/Library/Application Support/piper-voices/.")
@@ -236,7 +244,7 @@ struct PiperVoiceEngine: VoiceSynthesizer {
         guard let modelPath = segment.piperModelPath ?? LocalVoiceAssetLocator.onnxFiles(in: LocalVoiceAssetLocator.piperRoots).first?.path else {
             throw CocoaError(.fileNoSuchFile)
         }
-        guard let executable = ["/opt/homebrew/bin/piper", "/usr/local/bin/piper"].first(where: FileManager.default.isExecutableFile) else {
+        guard let executable = AppConfig.findExecutable(in: AppConfig.piperExecutablePaths) else {
             throw CocoaError(.fileNoSuchFile)
         }
         let process = Process()
@@ -244,10 +252,30 @@ struct PiperVoiceEngine: VoiceSynthesizer {
         process.arguments = ["--model", modelPath, "--output-file", outputURL.path]
         let inputPipe = Pipe()
         process.standardInput = inputPipe
+        
         try process.run()
         inputPipe.fileHandleForWriting.write(Data(segment.text.utf8))
         inputPipe.fileHandleForWriting.closeFile()
-        process.waitUntilExit()
+        
+        // Wait with timeout to prevent hanging
+        let waitGroup = DispatchGroup()
+        waitGroup.enter()
+        DispatchQueue.global().async {
+            process.waitUntilExit()
+            waitGroup.leave()
+        }
+        
+        if waitGroup.wait(timeout: .now() + AppConfig.workerProcessTimeout) == .timedOut {
+            process.terminate()
+            // Force kill if needed
+            DispatchQueue.global().asyncAfter(deadline: .now() + 2.0) {
+                if process.isRunning {
+                    process.interrupt()
+                }
+            }
+            throw CocoaError(.executableLoad)
+        }
+        
         if process.terminationStatus != 0 || !FileManager.default.fileExists(atPath: outputURL.path) {
             throw CocoaError(.executableLoad)
         }

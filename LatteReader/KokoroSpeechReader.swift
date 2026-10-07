@@ -128,6 +128,21 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
         currentTime = player?.currentTime ?? 0
         duration = player?.duration ?? 0
     }
+    
+    /// Skip to a specific chunk index
+    func skipToChunk(_ index: Int) {
+        guard index >= 0, index < queue.count else { return }
+        player?.stop()
+        currentIndex = index
+        playWhenReady(index: index, generationID: generationID)
+    }
+    
+    /// Seek to a specific time within the current chunk
+    func seek(to time: TimeInterval) {
+        guard let player else { return }
+        player.currentTime = max(0, min(time, player.duration))
+        currentTime = player.currentTime
+    }
 
     private func playWhenReady(index: Int, generationID expectedGenerationID: UUID) {
         guard expectedGenerationID == generationID else { return }
