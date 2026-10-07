@@ -1,26 +1,29 @@
-import AVFoundation
 import AppKit
 import PDFKit
+import PagePromptSupport
 import SwiftUI
 import UniformTypeIdentifiers
 
 // MARK: - Enums
 
 enum VoiceEngine: String, CaseIterable, Identifiable {
-    case piper = "Piper (Neural)"
-    case system = "System Voices"
+    case kokoro = "Kokoro"
+    case piper = "Piper (Fallback)"
     var id: String { rawValue }
 }
 
 // MARK: - Content View
 
 struct ContentView: View {
-    @StateObject private var speechReader = SpeechReader()
-    @StateObject private var piperReader = PiperSpeechReader()
+    @StateObject private var kokoroReader = KokoroSpeechReader()
+    @StateObject private var piperReader = KokoroSpeechReader(
+        primary: PiperVoiceEngine(),
+        fallback: PiperVoiceEngine()
+    )
     @StateObject private var pdfProxy = PDFViewProxy()
     @StateObject private var pdfProxyPage = PDFViewProxy()
 
-    @State private var selectedVoiceEngine: VoiceEngine = .piper
+    @State private var selectedVoiceEngine: VoiceEngine = .kokoro
 
     private var activeProxy: PDFViewProxy {
         selectedReadMode == .pageByPage ? pdfProxyPage : pdfProxy
@@ -32,16 +35,23 @@ struct ContentView: View {
     @State private var selectedReadMode: PDFReadMode = .fullDocument
     @State private var selectedParser: PDFParserChoice = .automatic
     @State private var selectedPageID = 0
-    @State private var selectedVoiceIdentifier = AVSpeechSynthesisVoice(language: Locale.current.identifier)?.identifier
-    @State private var speechRate = Double(AVSpeechUtteranceDefaultSpeechRate)
+    @State private var selectedPlaybackMode: MultiVoicePlaybackMode = .singleVoice
+    @State private var speakerFallbackPolicy: SpeakerFallbackPolicy = .narrator
+    @State private var voicePlan: DocumentVoicePlan?
+    @State private var isAnalyzingCharacters = false
+    @State private var analysisProgress: Double = 0
+    @State private var analysisMessage: String?
     @State private var errorMessage: String?
     @State private var isImporterPresented = false
+    @State private var keyMonitor: Any?
+    @State private var queueStatus: String?
 
     // Transport / playback state
     @State private var isPlaying = false
     @State private var playbackProgress: Double = 0
     @State private var playbackSpeed: Double = 1.0
     private let timerPublisher = Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()
+    private let voicePlanStore = DocumentVoicePlanStore()
 
     var body: some View {
         ZStack {
@@ -90,21 +100,8 @@ struct ContentView: View {
                 .padding(24)
             }
         }
-        .onChange(of: selectedVoiceIdentifier) { newVoice in
-            guard speechReader.isSpeaking || speechReader.isPaused else { return }
-            speechReader.restartCurrentChunk(rate: speechRate, voiceIdentifier: newVoice)
-        }
-        .onChange(of: speechRate) { newRate in
-            guard speechReader.isSpeaking || speechReader.isPaused else { return }
-            speechReader.restartCurrentChunk(rate: newRate, voiceIdentifier: selectedVoiceIdentifier)
-        }
-        .onChange(of: playbackSpeed) { newSpeed in
-            guard selectedVoiceEngine == .system,
-                  speechReader.isSpeaking || speechReader.isPaused else { return }
-            speechReader.restartCurrentChunk(rate: speechRate * newSpeed, voiceIdentifier: selectedVoiceIdentifier)
-        }
         .onChange(of: selectedVoiceEngine) { _ in
-            if speechReader.isSpeaking || speechReader.isPaused { speechReader.stop() }
+            if kokoroReader.isSpeaking || kokoroReader.isPaused { kokoroReader.stop() }
             if piperReader.isSpeaking || piperReader.isPaused { piperReader.stop() }
         }
         .onChange(of: pdfProxy.currentPageNumber) { pageNum in
@@ -116,11 +113,39 @@ struct ContentView: View {
         .onReceive(timerPublisher) { _ in
             guard isPlaying else { return }
             switch selectedVoiceEngine {
+            case .kokoro where kokoroReader.duration > 0:
+                kokoroReader.refreshProgress()
+                playbackProgress = min(1, kokoroReader.currentTime / kokoroReader.duration)
             case .piper where piperReader.duration > 0:
                 playbackProgress = min(1, piperReader.currentTime / piperReader.duration)
             default:
                 break
             }
+        }
+        .onAppear {
+            // Pre-warm the Kokoro worker so the model is loaded
+            // before the user presses Play.
+            kokoroReader.warmUp()
+            // AppKit-level ⌘⌥Q monitor for queueing selections.
+            // Must use a local monitor — SwiftUI shortcuts are unreliable
+            // in debug builds and conflict with system ⌘Q / ⌘⇧Q.
+            let monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                if event.modifierFlags.contains(.command),
+                   event.modifierFlags.contains(.option),
+                   event.charactersIgnoringModifiers?.lowercased() == "q" {
+                    queueCurrentSelection()
+                    return nil
+                }
+                return event
+            }
+            keyMonitor = monitor
+        }
+        .onDisappear {
+            if let m = keyMonitor { NSEvent.removeMonitor(m) }
+        }
+        .onChange(of: selectedVoiceEngine) { _ in
+            if kokoroReader.isSpeaking || kokoroReader.isPaused { kokoroReader.stop() }
+            if piperReader.isSpeaking || piperReader.isPaused { piperReader.stop() }
         }
         .fileImporter(
             isPresented: $isImporterPresented,
@@ -232,7 +257,7 @@ struct ContentView: View {
                 Text("Choose a PDF to begin")
                     .font(.title2.weight(.semibold))
                     .foregroundColor(.cream)
-                Text("Open a PDF, extract selectable text, and listen with\nPiper neural voices or macOS system voices.")
+                Text("Open a PDF, extract selectable text, and listen with\nKokoro character voices or Piper fallback.")
                     .font(.subheadline)
                     .foregroundColor(.textMuted)
                     .multilineTextAlignment(.center)
@@ -258,6 +283,23 @@ struct ContentView: View {
     private func sidePanel(for pdf: LoadedPDF) -> some View {
         ScrollView {
             VStack(spacing: 16) {
+                // ── Queue status toast ──
+                if let queueStatus {
+                    HStack(spacing: 8) {
+                        Image(systemName: "waveform")
+                            .font(.system(size: 12))
+                        Text(queueStatus)
+                            .font(.system(size: 11, weight: .medium))
+                        Spacer()
+                    }
+                    .foregroundColor(.butter)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color.caramel.opacity(0.15))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                }
+
                 // ── Document Panel ──
                 Bezel {
                     VStack(alignment: .leading, spacing: 12) {
@@ -413,8 +455,8 @@ struct ContentView: View {
                         PanelHeader(label: "Voice")
                         CoffeeSegmentedControl(
                             options: [
+                                (id: VoiceEngine.kokoro.rawValue, label: "Kokoro"),
                                 (id: VoiceEngine.piper.rawValue, label: "Piper"),
-                                (id: VoiceEngine.system.rawValue, label: "System"),
                             ],
                             selection: Binding(
                                 get: { selectedVoiceEngine.rawValue },
@@ -426,29 +468,92 @@ struct ContentView: View {
                             )
                         )
 
-                        if selectedVoiceEngine == .system {
-                            Picker("Voice", selection: $selectedVoiceIdentifier) {
-                                Text("System default").tag(Optional<String>.none)
-                                ForEach(speechReader.voices, id: \.identifier) { voice in
-                                    Text("\(voice.name) (\(voice.language))")
-                                        .tag(Optional(voice.identifier))
-                                }
-                            }
-                            .pickerStyle(.menu)
-                            .tint(.caramel)
-
-                            HStack {
-                                Text("Rate")
-                                    .font(.caption)
-                                    .foregroundColor(.textMuted)
-                                Slider(value: $speechRate, in: 0.35...0.65)
-                                    .tint(.caramel)
-                            }
+                        if selectedVoiceEngine == .kokoro {
+                            Text(kokoroReader.availability.isAvailable ? "Kokoro multi-voice is ready for character playback." : kokoroReader.availability.message)
+                                .font(.system(size: 10))
+                                .foregroundColor(kokoroReader.availability.isAvailable ? .textMuted : .caramel)
+                                .lineLimit(4)
+                                .fixedSize(horizontal: false, vertical: true)
                         } else {
-                            Text("Piper neural voice (Ryan, en-US) — natural prosody with punctuation handling.")
+                            Text("Piper remains the lightweight single-voice fallback and backup character engine.")
                                 .font(.system(size: 10))
                                 .foregroundColor(.textMuted)
                                 .lineLimit(3)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .padding(16)
+                }
+
+                // ── AI Multi-Voice Panel ──
+                Bezel {
+                    VStack(alignment: .leading, spacing: 10) {
+                        PanelHeader(label: "AI Multi-Voice")
+                        CoffeeSegmentedControl(
+                            options: [
+                                (id: MultiVoicePlaybackMode.singleVoice.rawValue, label: "Single"),
+                                (id: MultiVoicePlaybackMode.multiVoice.rawValue, label: "Multi"),
+                            ],
+                            selection: Binding(
+                                get: { selectedPlaybackMode.rawValue },
+                                set: { val in
+                                    if let mode = MultiVoicePlaybackMode.allCases.first(where: { $0.rawValue == val }) {
+                                        selectedPlaybackMode = mode
+                                    }
+                                }
+                            )
+                        )
+                        CoffeeSegmentedControl(
+                            options: [
+                                (id: SpeakerFallbackPolicy.narrator.rawValue, label: "Narrator"),
+                                (id: SpeakerFallbackPolicy.bestGuess.rawValue, label: "Guess"),
+                            ],
+                            selection: Binding(
+                                get: { speakerFallbackPolicy.rawValue },
+                                set: { val in
+                                    if let policy = SpeakerFallbackPolicy.allCases.first(where: { $0.rawValue == val }) {
+                                        speakerFallbackPolicy = policy
+                                    }
+                                }
+                            )
+                        )
+
+                        KeyButton(label: isAnalyzingCharacters ? "Analyzing…" : "Analyze Characters") {
+                            analyzeCharacters(for: pdf)
+                        }
+                        .disabled(isAnalyzingCharacters || isParsingText || pdf.totalCharacterCount == 0)
+
+                        if isAnalyzingCharacters {
+                            ProgressView(value: analysisProgress)
+                                .tint(.caramel)
+                            Text("Analyzing… \(Int(analysisProgress * 100))%")
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundColor(.textMuted)
+                        }
+
+                        if let voicePlan {
+                            Text("\(voicePlan.enabledProfileCount) speakers · \(voicePlan.segments.count) segments")
+                                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                .foregroundColor(.butter)
+                            ForEach(voicePlan.profiles.prefix(6)) { profile in
+                                HStack(spacing: 8) {
+                                    Circle()
+                                        .fill(profile.id == VoiceProfile.narratorID ? Color.caramel : Color.textMuted)
+                                        .frame(width: 7, height: 7)
+                                    Text(profile.displayName)
+                                        .font(.system(size: 11, weight: .medium))
+                                        .foregroundColor(.cream)
+                                        .lineLimit(1)
+                                    Spacer()
+                                    Text("\(Int(profile.confidence * 100))%")
+                                        .font(.system(size: 10, design: .monospaced))
+                                        .foregroundColor(.textMuted)
+                                }
+                            }
+                        } else {
+                            Text(analysisMessage ?? "Analyze first, then use Kokoro for distinct character voices. Piper is the fallback if Kokoro assets are missing.")
+                                .font(.system(size: 10))
+                                .foregroundColor(.textMuted)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     }
@@ -567,6 +672,18 @@ struct ContentView: View {
                 }
                 .buttonStyle(TransportBtnStyle())
 
+                // Queue selection (test)
+                Button { queueCurrentSelection() } label: {
+                    Text("Q")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundColor(.espresso)
+                        .frame(width: 22, height: 22)
+                        .background(Color.butter.opacity(0.3))
+                        .clipShape(RoundedRectangle(cornerRadius: 5))
+                }
+                .buttonStyle(PlainButtonStyle())
+                .help("⌘⌥Q — Queue selection")
+
                 // Play/Pause
                 Button {
                     togglePlayback()
@@ -672,32 +789,103 @@ struct ContentView: View {
         let selection = activeProxy.currentSelectionText()?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let text: String
+        let hasSelection: Bool
         if let selection, !selection.isEmpty {
             text = selection
+            hasSelection = true
         } else {
             text = textToRead(from: pdf)
+            hasSelection = false
         }
-        switch selectedVoiceEngine {
-        case .piper:
-            piperReader.start(text: text)
-        case .system:
-            speechReader.start(text: text, rate: speechRate * playbackSpeed, voiceIdentifier: selectedVoiceIdentifier)
+
+        if hasSelection {
+            // Selection active — read selected text directly.
+            // Bypass the voice plan; the plan covers the full document.
+            startEngine(text: text, rate: playbackSpeed)
+        } else if selectedPlaybackMode == .multiVoice {
+            let pageNum: Int?
+            if selectedReadMode == .pageByPage {
+                pageNum = selectedPageID + 1
+            } else {
+                pageNum = nil
+            }
+            let segments = MultiVoiceAnalyzer().playbackSegments(
+                for: text,
+                pageNumber: pageNum,
+                using: voicePlan,
+                defaultVoiceIdentifier: nil,
+                fallbackPolicy: speakerFallbackPolicy
+            )
+            if !kokoroReader.availability.isAvailable {
+                analysisMessage = "Kokoro is not ready. Using Piper fallback if a Piper model is installed."
+            }
+            selectedVoiceEngine = .kokoro
+            kokoroReader.start(segments: segments, rate: playbackSpeed)
+        } else {
+            startEngine(text: text, rate: playbackSpeed)
         }
         isPlaying = true
     }
 
+    /// Route playback to the engine the user selected.
+    private func startEngine(text: String, rate: Double) {
+        switch selectedVoiceEngine {
+        case .kokoro:
+            let segments = makeSegments(for: text, kokoroVoiceID: "af_heart")
+            kokoroReader.start(segments: segments, rate: rate)
+        case .piper:
+            let segments = makeSegments(for: text, kokoroVoiceID: nil)
+            piperReader.start(segments: segments, rate: rate)
+        }
+    }
+
+    /// Queue the current text selection into the active engine's queue.
+    private func queueCurrentSelection() {
+        NSLog("⌘⌥Q fired")
+        guard pdfDocument != nil,
+              let selection = activeProxy.currentSelectionText()?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !selection.isEmpty else {
+            NSLog("⌘⌥Q: no selection or no doc — pdfDoc=\(pdfDocument != nil), sel=\(activeProxy.currentSelectionText() ?? "nil")")
+            return
+        }
+        NSLog("⌘⌥Q: selection='\(selection.prefix(80))' (\(selection.count) chars)")
+        let count: Int
+        switch selectedVoiceEngine {
+        case .kokoro:
+            kokoroReader.append(segments: makeSegments(for: selection, kokoroVoiceID: "af_heart"))
+            count = kokoroReader.totalChunks
+        case .piper:
+            piperReader.append(segments: makeSegments(for: selection, kokoroVoiceID: nil))
+            count = piperReader.totalChunks
+        }
+        analysisMessage = "Queued selection — \(count) total chunk(s)"
+        queueStatus = "✓ Queued — \(count) chunk(s)"
+        // Auto-clear the toast after 4 seconds
+        let clearJob = DispatchWorkItem { [self] in
+            if queueStatus?.hasPrefix("✓") == true { queueStatus = nil }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4, execute: clearJob)
+    }
+
+    /// Build narration segments from raw text.
+    private func makeSegments(for text: String, kokoroVoiceID: String?) -> [PlannedSpeechSegment] {
+        MultiVoiceAnalyzer.chunk(text: text).map {
+            PlannedSpeechSegment(text: $0, voiceIdentifier: nil, kokoroVoiceID: kokoroVoiceID, piperModelPath: MultiVoiceAnalyzer.availablePiperModels().first, speakerName: "Narrator")
+        }
+    }
+
     private func pausePlayback() {
         switch selectedVoiceEngine {
+        case .kokoro: kokoroReader.pauseOrContinue()
         case .piper: piperReader.pauseOrContinue()
-        case .system: speechReader.pauseOrContinue()
         }
-        isPlaying = selectedVoiceEngine == .piper ? piperReader.isSpeaking : speechReader.isSpeaking
+        isPlaying = selectedVoiceEngine == .kokoro ? kokoroReader.isSpeaking : piperReader.isSpeaking
     }
 
     private func stopPlayback() {
         switch selectedVoiceEngine {
+        case .kokoro: kokoroReader.stop()
         case .piper: piperReader.stop()
-        case .system: speechReader.stop()
         }
         isPlaying = false
         playbackProgress = 0
@@ -707,11 +895,13 @@ struct ContentView: View {
         let total: TimeInterval
         let elapsed: TimeInterval
         switch selectedVoiceEngine {
+        case .kokoro where kokoroReader.duration > 0:
+            total = kokoroReader.duration
+            elapsed = kokoroReader.currentTime
         case .piper where piperReader.duration > 0:
             total = piperReader.duration
             elapsed = piperReader.currentTime
         default:
-            // Fallback for system voices or when no progress data is available
             let estimatedTotal: TimeInterval = 12 * 60 + 45
             total = estimatedTotal
             elapsed = estimatedTotal * playbackProgress
@@ -733,16 +923,18 @@ struct ContentView: View {
     /// Launches the standalone PagePrompt helper process for typed page entry.
     /// Uses a separate process so SwiftUI's broken TextField can't block input.
     private func promptPageNumber(totalPages: Int) {
-        let projectRoot = "\(FileManager.default.homeDirectoryForCurrentUser.path)/Projects/PDFReaderSpeaker"
-        let helperPath = "\(projectRoot)/.build/helper/PagePrompt"
+        guard let helperURL = PagePromptLocator.executableURL() else {
+            print("Unable to resolve PagePrompt relative to the LatteReader executable")
+            return
+        }
 
-        guard FileManager.default.isExecutableFile(atPath: helperPath) else {
-            print("Helper not found at: \(helperPath)")
+        guard FileManager.default.isExecutableFile(atPath: helperURL.path) else {
+            print("Helper not found at: \(helperURL.path)")
             return
         }
 
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: helperPath)
+        process.executableURL = helperURL
         process.arguments = ["\(totalPages)", "\(activeProxy.currentPageNumber)"]
 
         let pipe = Pipe()
@@ -768,8 +960,11 @@ struct ContentView: View {
     // MARK: - Import
 
     private func handleImport(_ result: Result<[URL], Error>) {
-        speechReader.stop()
+        kokoroReader.stop()
         piperReader.stop()
+        voicePlan = nil
+        analysisProgress = 0
+        analysisMessage = nil
         let parser = self.parser
 
         do {
@@ -805,6 +1000,12 @@ struct ContentView: View {
                     let pdf = try parser.loadPDF(from: url)
                     await MainActor.run {
                         loadedPDF = pdf
+                        let documentID = MultiVoiceAnalyzer.documentID(for: pdf)
+                        voicePlan = voicePlanStore.load(documentID: documentID)
+                        if voicePlan != nil {
+                            selectedPlaybackMode = .multiVoice
+                            analysisMessage = "Restored saved voice plan."
+                        }
                         isParsingText = false
                     }
                 } catch {
@@ -819,6 +1020,33 @@ struct ContentView: View {
             pdfDocument = nil
             isParsingText = false
             errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
+    private func analyzeCharacters(for pdf: LoadedPDF) {
+        isAnalyzingCharacters = true
+        analysisProgress = 0.1
+        voicePlan = nil
+        analysisMessage = "Preparing local document analysis…"
+        Task {
+            analysisProgress = 0.35
+            analysisMessage = "Segmenting pages and dialogue…"
+            try? await Task.sleep(nanoseconds: 120_000_000)
+            analysisProgress = 0.7
+            analysisMessage = "Scoring likely speakers…"
+            let analyzer = MultiVoiceAnalyzer()
+            let plan = await Task.detached(priority: .userInitiated) {
+                analyzer.analyze(pdf: pdf)
+            }.value
+            await MainActor.run {
+                voicePlan = plan
+                voicePlanStore.save(plan)
+                selectedPlaybackMode = .multiVoice
+                selectedVoiceEngine = .kokoro
+                analysisProgress = 1
+                isAnalyzingCharacters = false
+                analysisMessage = "Detected \(max(plan.enabledProfileCount - 1, 0)) likely character speakers. Kokoro enabled for character voices; Piper will be used if Kokoro is unavailable."
+            }
         }
     }
 

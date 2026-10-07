@@ -22,3 +22,6 @@ DerivedData/
 .idea/
 .vscode/
 *.sw?
+
+# Build artifacts and bundled voice models
+dist/

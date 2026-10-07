@@ -1,0 +1,22 @@
+#!/bin/sh
+# Launch the installed app, independent of checkout and current directory.
+APP="${LATTE_READER_APP:-/Applications/LatteReader.app}"
+case "${1:-}" in
+  --help|-h)
+    printf '%s\n' 'Usage: latte-reader [--foreground]' 'Default: open/activate the installed macOS app.' '--foreground: run its executable with logs in this terminal.' 'Select PDFs using Open PDF inside the app; PDF command-line arguments are not supported.' 'Optional LATTE_READER_APP selects another complete bundle.'
+    exit 0 ;;
+  --foreground)
+    shift
+    mode=foreground ;;
+  '') mode=open ;;
+  *) printf '%s\n' 'Unsupported argument. Use latte-reader --help.' >&2; exit 2 ;;
+esac
+[ "$#" -eq 0 ] || { printf '%s\n' 'PDF command-line arguments are not supported.' >&2; exit 2; }
+[ -x "$APP/Contents/MacOS/LatteReader" ] && [ -x "$APP/Contents/MacOS/PagePrompt" ] || {
+  printf '%s\n' "Missing complete LatteReader app: $APP" >&2
+  exit 1
+}
+if [ "$mode" = foreground ]; then
+  exec "$APP/Contents/MacOS/LatteReader"
+fi
+exec /usr/bin/open "$APP"

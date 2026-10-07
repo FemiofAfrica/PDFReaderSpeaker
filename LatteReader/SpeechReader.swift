@@ -2,7 +2,7 @@ import AVFoundation
 import Foundation
 
 @MainActor
-final class SpeechReader: NSObject, ObservableObject {
+final class SpeechReader: NSObject, ObservableObject, SpeechEngine {
     @Published private(set) var isSpeaking = false
     @Published private(set) var isPaused = false
     @Published private(set) var currentChunkIndex = 0
@@ -10,7 +10,7 @@ final class SpeechReader: NSObject, ObservableObject {
     @Published private(set) var status = "Ready"
 
     private let synthesizer = AVSpeechSynthesizer()
-    private var chunks: [String] = []
+    private var chunks: [PlannedSpeechSegment] = []
     private var selectedVoiceIdentifier: String?
     private var selectedRate: Float = AVSpeechUtteranceDefaultSpeechRate
     /// Set true during a restart so didCancel doesn't reset speaking state.
@@ -35,7 +35,9 @@ final class SpeechReader: NSObject, ObservableObject {
         stop()
         selectedRate = Float(rate)
         selectedVoiceIdentifier = voiceIdentifier
-        chunks = Self.chunk(text: text)
+        chunks = MultiVoiceAnalyzer.chunk(text: text).map {
+            PlannedSpeechSegment(text: $0, voiceIdentifier: voiceIdentifier, kokoroVoiceID: nil, piperModelPath: nil, speakerName: "Narrator")
+        }
         totalChunks = chunks.count
         currentChunkIndex = 0
 
@@ -47,6 +49,25 @@ final class SpeechReader: NSObject, ObservableObject {
         isSpeaking = true
         isPaused = false
         status = "Reading chunk 1 of \(totalChunks)"
+        speakCurrentChunk()
+    }
+
+    func start(segments: [PlannedSpeechSegment], rate: Double, fallbackVoiceIdentifier: String?) {
+        stop()
+        selectedRate = Float(rate)
+        selectedVoiceIdentifier = fallbackVoiceIdentifier
+        chunks = segments.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        totalChunks = chunks.count
+        currentChunkIndex = 0
+
+        guard !chunks.isEmpty else {
+            status = "No text available to read."
+            return
+        }
+
+        isSpeaking = true
+        isPaused = false
+        status = "Reading \(chunks[0].speakerName) 1 of \(totalChunks)"
         speakCurrentChunk()
     }
 
@@ -101,12 +122,14 @@ final class SpeechReader: NSObject, ObservableObject {
             return
         }
 
-        let utterance = AVSpeechUtterance(string: chunks[currentChunkIndex])
+        let chunk = chunks[currentChunkIndex]
+        let utterance = AVSpeechUtterance(string: chunk.text)
         utterance.rate = selectedRate
-        if let selectedVoiceIdentifier,
-           let voice = AVSpeechSynthesisVoice(identifier: selectedVoiceIdentifier) {
+        if let voiceIdentifier = chunk.voiceIdentifier ?? selectedVoiceIdentifier,
+           let voice = AVSpeechSynthesisVoice(identifier: voiceIdentifier) {
             utterance.voice = voice
         }
+        status = "Reading \(chunk.speakerName) \(currentChunkIndex + 1) of \(totalChunks)"
         synthesizer.speak(utterance)
     }
 
@@ -116,30 +139,6 @@ final class SpeechReader: NSObject, ObservableObject {
         status = "Finished reading"
     }
 
-    private static func chunk(text: String, maxLength: Int = 3_500) -> [String] {
-        let cleanText = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleanText.isEmpty else { return [] }
-
-        var output: [String] = []
-        var current = ""
-        let sentences = cleanText.components(separatedBy: CharacterSet(charactersIn: ".!?\n"))
-
-        for sentence in sentences {
-            let trimmed = sentence.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { continue }
-            let candidate = current.isEmpty ? trimmed : current + ". " + trimmed
-
-            if candidate.count > maxLength {
-                if !current.isEmpty { output.append(current) }
-                current = trimmed
-            } else {
-                current = candidate
-            }
-        }
-
-        if !current.isEmpty { output.append(current) }
-        return output
-    }
 }
 
 extension SpeechReader: AVSpeechSynthesizerDelegate {

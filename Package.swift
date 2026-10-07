@@ -7,12 +7,27 @@ let package = Package(
         .macOS(.v13)
     ],
     products: [
-        .executable(name: "LatteReader", targets: ["LatteReader"])
+        .executable(name: "LatteReader", targets: ["LatteReader"]),
+        .executable(name: "PagePrompt", targets: ["PagePrompt"]),
     ],
     targets: [
+        .target(
+            name: "PagePromptSupport",
+            path: "PagePromptSupport"
+        ),
         .executableTarget(
             name: "LatteReader",
+            dependencies: ["PagePromptSupport"],
             path: "LatteReader"
-        )
+        ),
+        .executableTarget(
+            name: "PagePrompt",
+            path: "PagePrompt"
+        ),
+        .testTarget(
+            name: "PagePromptSupportTests",
+            dependencies: ["PagePromptSupport"],
+            path: "Tests/PagePromptSupportTests"
+        ),
     ]
 )

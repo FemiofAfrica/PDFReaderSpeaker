@@ -1,6 +1,6 @@
 # LatteReader
 
-A warm, premium macOS app that opens PDFs and reads them aloud using **Piper neural TTS** or **macOS system voices**.
+A warm, premium macOS app that opens PDFs and reads them aloud using **Kokoro character voices** with **Piper neural TTS** as the lightweight fallback.
 
 Built with native SwiftUI + PDFKit. Wrapped in a cozy chocolate-brown aesthetic — like your favorite coffee shop, but for documents.
 
@@ -9,10 +9,12 @@ Built with native SwiftUI + PDFKit. Wrapped in a cozy chocolate-brown aesthetic 
 - **Open any PDF** via the macOS file picker (`⌘O`)
 - **Dual reading modes**: Full document continuous scroll or page-by-page
 - **Rich speech output**:
-  - **Piper neural TTS** — natural prosody with punctuation handling (Ryan, en-US)
-  - **macOS system voices** — with configurable speech rate
+  - **Kokoro local TTS** — default multi-voice engine for narrator and character playback
+  - **Piper neural TTS** — lightweight single-voice path and fallback when Kokoro is unavailable
 - **Smart text extraction** — picks up selectable text via PDFKit with automatic fallback
 - **Selection-aware reading** — reads selected text if you've highlighted something, otherwise reads the current page or entire document
+- **AI-assisted multi-voice reading** — locally analyzes text for narrator, dialogue, explicit speaker labels, and likely character attributions
+- **Per-document voice plans** — detected speakers and voice assignments are saved locally and restored when the same PDF is opened again
 - **Play / Pause / Stop** controls with spacebar shortcut
 - **Page navigation** — jump to any page, zoom in/out (`⌘+` / `⌘−`), fit to width (`⌘0`)
 - **Large document handling** — splits speech into manageable chunks
@@ -50,15 +52,40 @@ Then select the `LatteReader` scheme and press **Run**.
 
 ## Voice Engines
 
-### Piper (recommended)
+### Kokoro (default for character voices)
 
-The app bundles configuration for [Piper](https://github.com/rhasspy/piper), a fast neural text-to-speech system. It uses the **Ryan (en-US)** voice by default, which provides natural prosody, proper punctuation handling, and significantly more natural output than traditional system voices.
+Kokoro is the default local multi-voice engine for narrator and character playback. LatteReader discovers Kokoro ONNX assets from `~/Library/Application Support/LatteReader/kokoro/`, `~/Library/Application Support/kokoro-voices/`, or the app bundle's `Resources/kokoro/` folder.
 
-Piper runs locally — no internet connection or API keys needed.
+The app does not ship third-party Kokoro weights by default. Place Apache-2.0-compatible Kokoro model and voice assets locally, and install a `kokoro-tts` CLI at `/opt/homebrew/bin/kokoro-tts`, `/usr/local/bin/kokoro-tts`, `~/.local/bin/kokoro-tts`, or the local Application Support wrapper.
 
-### System Voices
+### Piper (fallback and simple reading)
 
-macOS includes a range of built-in voices via `AVSpeechSynthesizer`. The app provides a rate slider and voice picker for full control.
+Piper remains the lightweight local fallback and simple single-voice path. Place Piper `.onnx` models in `~/Library/Application Support/piper-voices/` or the app bundle's `Resources/piper-voices/` folder.
+
+## AI Multi-Voice Reading
+
+The **AI Multi-Voice** panel implements the local MVP described in `docs/ai-multi-voice-pdf-reading-prd.md`:
+
+- **Analyze Characters** segments extracted PDF text into narrator, dialogue, heading, explicit-speaker, and unknown blocks.
+- The local heuristic detector recognizes script-style speaker labels (`ELIZABETH:`), quoted dialogue, em-dash dialogue, and common attribution patterns such as “Elizabeth said”.
+- A narrator profile is always created, and up to 12 detected speakers receive Kokoro voice IDs first, plus Piper model paths for fallback.
+- **Single voice** mode remains available at all times; **Multi-voice** mode reads planned segments through Kokoro and automatically falls back to Piper when Kokoro is unavailable.
+- **Narrator fallback** uses the narrator voice for low-confidence dialogue; **Best guess** allows lower-confidence speaker assignments during playback.
+- Voice plans are persisted as JSON in the app's Application Support folder, keyed by a stable document fingerprint.
+
+Current MVP limits: multi-voice quality depends on local Kokoro assets being installed or placed in Application Support. Piper can keep playback local when Kokoro is missing, but it is less expressive. Character detection is intentionally heuristic and private by default; the code is structured so a future LLM provider can replace or augment the local analyzer.
+
+## Standalone App Bundle
+
+Create a launchable macOS app bundle with:
+
+```bash
+./scripts/build_app.sh
+```
+
+The output is `dist/LatteReader.app`. Drag it into `/Applications` to run it independently from Xcode, Terminal, or the source checkout. For sharing outside your own Mac, use Apple Developer ID signing and notarization; the script currently creates a local development bundle.
+
+See `docs/voice-and-distribution-plan.md` for the voice quality and distribution plan.
 
 ## Local Signing Note
 
@@ -77,6 +104,7 @@ LatteReader/
     ├── Theme.swift                # Color palette & ambient background
     ├── PDFKitView.swift           # PDFKit NSViewRepresentable wrapper
     ├── PDFDocumentReader.swift    # Text parsing protocol & implementations
+    ├── MultiVoiceReading.swift    # Character analysis, voice profiles, plans, persistence
     ├── SpeechReader.swift         # AVSpeechSynthesizer wrapper
     ├── PiperSpeechReader.swift    # Piper neural TTS integration
     └── WindowResizeEnforcer.swift # Window resize utility
