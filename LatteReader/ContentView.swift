@@ -24,10 +24,12 @@ struct ContentView: View {
     @StateObject private var pdfProxyPage = PDFViewProxy()
     @StateObject private var playbackControls = PlaybackControls()
     @StateObject private var errorHandler = ErrorHandler()
+    @StateObject private var speechHighlighter = SpeechHighlighter()
     
     private let voiceChangeDebouncer = Debouncer(delay: 0.5)
 
     @State private var selectedVoiceEngine: VoiceEngine = .kokoro
+    @State private var currentChunks: [PlannedSpeechSegment] = []
 
     private var activeProxy: PDFViewProxy {
         selectedReadMode == .pageByPage ? pdfProxyPage : pdfProxy
@@ -120,8 +122,10 @@ struct ContentView: View {
             case .kokoro where kokoroReader.duration > 0:
                 kokoroReader.refreshProgress()
                 playbackProgress = min(1, kokoroReader.currentTime / kokoroReader.duration)
+                updateHighlightForKokoro()
             case .piper where piperReader.duration > 0:
                 playbackProgress = min(1, piperReader.currentTime / piperReader.duration)
+                updateHighlightForPiper()
             default:
                 break
             }
@@ -654,7 +658,8 @@ struct ContentView: View {
                         currentPage: $selectedPageID,
                         displayMode: .singlePageContinuous,
                         isActive: selectedReadMode == .fullDocument,
-                        proxy: pdfProxy
+                        proxy: pdfProxy,
+                        highlighter: speechHighlighter
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .opacity(selectedReadMode == .fullDocument ? 1 : 0)
@@ -665,7 +670,8 @@ struct ContentView: View {
                         currentPage: $selectedPageID,
                         displayMode: .singlePage,
                         isActive: selectedReadMode == .pageByPage,
-                        proxy: pdfProxyPage
+                        proxy: pdfProxyPage,
+                        highlighter: speechHighlighter
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .opacity(selectedReadMode == .pageByPage ? 1 : 0)
@@ -892,6 +898,7 @@ struct ContentView: View {
                 return
             }
             selectedVoiceEngine = .kokoro
+            currentChunks = segments
             kokoroReader.start(segments: segments, rate: playbackSpeed)
         } else {
             startEngine(text: text, rate: playbackSpeed)
@@ -904,9 +911,11 @@ struct ContentView: View {
         switch selectedVoiceEngine {
         case .kokoro:
             let segments = makeSegments(for: text, kokoroVoiceID: "af_heart")
+            currentChunks = segments
             kokoroReader.start(segments: segments, rate: rate)
         case .piper:
             let segments = makeSegments(for: text, kokoroVoiceID: nil)
+            currentChunks = segments
             piperReader.start(segments: segments, rate: rate)
         }
     }
@@ -961,6 +970,8 @@ struct ContentView: View {
         }
         isPlaying = false
         playbackProgress = 0
+        speechHighlighter.clearHighlight()
+        currentChunks = []
     }
     
     private func handleWaveformSeek(_ progress: Double) {
@@ -968,6 +979,42 @@ struct ContentView: View {
         let targetTime = progress * reader.duration
         reader.seek(to: targetTime)
         playbackProgress = progress
+    }
+    
+    // MARK: - Highlighting
+    
+    private func updateHighlightForKokoro() {
+        guard let loadedPDF else { return }
+        let index = kokoroReader.currentChunkIndex
+        guard index < currentChunks.count else { return }
+        
+        let chunk = currentChunks[index]
+        let approximatePage = speechHighlighter.approximatePageForChunk(
+            index: index,
+            chunks: currentChunks,
+            pdfPageTexts: loadedPDF.pages
+        )
+        
+        highlightCurrentChunk(chunk.text, approximatePage: approximatePage)
+    }
+    
+    private func updateHighlightForPiper() {
+        guard let loadedPDF else { return }
+        let index = piperReader.currentChunkIndex
+        guard index < currentChunks.count else { return }
+        
+        let chunk = currentChunks[index]
+        let approximatePage = speechHighlighter.approximatePageForChunk(
+            index: index,
+            chunks: currentChunks,
+            pdfPageTexts: loadedPDF.pages
+        )
+        
+        highlightCurrentChunk(chunk.text, approximatePage: approximatePage)
+    }
+    
+    private func highlightCurrentChunk(_ text: String, approximatePage: Int?) {
+        speechHighlighter.highlightChunk(text, searchFrom: approximatePage)
     }
 
     private var elapsedString: String {
@@ -1057,6 +1104,9 @@ struct ContentView: View {
             }
             pdfDocument = document
             errorMessage = nil
+            
+            // Set up highlighter with document
+            speechHighlighter.setPDFDocument(document, view: nil)
 
             let pageCount = document.pageCount
             let placeholderPages = (0..<pageCount).map {
@@ -1087,6 +1137,8 @@ struct ContentView: View {
                             analysisMessage = "Restored saved voice plan."
                         }
                         isParsingText = false
+                        // Set document text for highlighter
+                        speechHighlighter.setDocumentText(pdf.fullText)
                     }
                 } catch {
                     await MainActor.run {
