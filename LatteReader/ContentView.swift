@@ -947,38 +947,47 @@ struct ContentView: View {
     private func startPlayback(for pdf: LoadedPDF) {
         let selection = activeProxy.currentSelectionText()?
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let text: String
-        let hasSelection: Bool
-        let startPage: Int
         
         if let selection, !selection.isEmpty {
-            text = selection
-            hasSelection = true
-            startPage = selectedPageID
+            // Selection mode: start with selection, then continue from next page
+            startFromSelection(selection, pdf: pdf, currentPage: selectedPageID)
         } else {
-            // No selection: read from current page in page-by-page mode, or full doc in continuous mode
-            if selectedReadMode == .pageByPage {
-                // Just current page for fast startup
-                text = pdf.pages.first(where: { $0.id == selectedPageID })?.text ?? ""
-                startPage = selectedPageID
-            } else {
-                // Full document mode - but only if already parsed
-                text = textToRead(from: pdf)
-                startPage = selectedPageID
-            }
-            hasSelection = false
+            // No selection: start from current page and continue forward
+            startFromCurrentPage(pdf: pdf, currentPage: selectedPageID)
         }
-
+    }
+    
+    private func startFromSelection(_ selection: String, pdf: LoadedPDF, currentPage: Int) {
+        // Play the selection first
+        let selectionSegments = makeSegments(for: selection, kokoroVoiceID: "af_heart")
+        
+        // Then continue with the rest of the document from the next page
+        let restOfDocument = textFromPage(currentPage + 1, through: pdf.pageCount - 1, in: pdf)
+        let continuationSegments = restOfDocument.isEmpty ? [] : makeSegments(for: restOfDocument, kokoroVoiceID: "af_heart")
+        
+        let allSegments = selectionSegments + continuationSegments
+        currentChunks = allSegments
+        
+        switch selectedVoiceEngine {
+        case .kokoro:
+            kokoroReader.start(segments: allSegments, rate: playbackSpeed)
+        case .piper:
+            piperReader.start(segments: allSegments, rate: playbackSpeed)
+        }
+        
+        isPlaying = true
+    }
+    
+    private func startFromCurrentPage(pdf: LoadedPDF, currentPage: Int) {
+        // Build text from current page forward through the end of the document
+        let text = textFromPage(currentPage, through: pdf.pageCount - 1, in: pdf)
+        
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            errorMessage = "No text to read from current selection or page."
+            errorMessage = "No text to read from current page."
             return
         }
-
-        if hasSelection {
-            // Selection active — read selected text directly.
-            // Bypass the voice plan; the plan covers the full document.
-            startEngine(text: text, rate: playbackSpeed)
-        } else if selectedPlaybackMode == .multiVoice {
+        
+        if selectedPlaybackMode == .multiVoice {
             let pageNum: Int?
             if selectedReadMode == .pageByPage {
                 pageNum = selectedPageID + 1
@@ -1007,6 +1016,15 @@ struct ContentView: View {
             startEngine(text: text, rate: playbackSpeed)
         }
         isPlaying = true
+    }
+    
+    /// Get text from a range of pages
+    private func textFromPage(_ startPage: Int, through endPage: Int, in pdf: LoadedPDF) -> String {
+        let pageRange = startPage...endPage
+        return pdf.pages
+            .filter { pageRange.contains($0.id) }
+            .map { $0.text }
+            .joined(separator: "\n\n")
     }
 
     /// Route playback to the engine the user selected.
