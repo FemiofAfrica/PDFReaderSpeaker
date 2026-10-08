@@ -153,19 +153,26 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
         guard index >= 0, index < queue.count else { return }
         player?.stop()
         currentIndex = index
-        // Bump generation to drop stale renders from old position
-        generationID = UUID()
-        logger.notice("Skip: new generationID to drop stale work")
         
-        // If job in flight, restart worker
-        let hasJobInFlight = stateQueue.sync { jobInFlight }
-        if hasJobInFlight {
-            logger.log(level: .info, "Killed in-flight stale job, restarting worker")
-            KokoroWorker.shared.restartAsync()
-            stateQueue.sync { jobInFlight = false }
+        // Check if there's an in-flight job and if it's before the target
+        let (hasJobInFlight, inFlightIndex) = stateQueue.sync { 
+            (jobInFlight, renderingIndices.min())
         }
         
+        if hasJobInFlight, let inFlightIdx = inFlightIndex, inFlightIdx < index {
+            // In-flight job is before target, kill it
+            logger.notice("Skip: in-flight job at chunk \(inFlightIdx, privacy: .public) is before target \(index, privacy: .public), killing worker")
+            KokoroWorker.shared.terminateWorkerProcess()
+            stateQueue.sync { jobInFlight = false }
+            generationID = UUID()
+        } else {
+            logger.notice("Skip to chunk \(index, privacy: .public): keeping useful in-flight work")
+        }
+        
+        // Enqueue target and read-ahead
+        logger.notice("Rendering chunk \(index, privacy: .public) (skip target)")
         playWhenReady(index: index, generationID: generationID)
+        fillRenderPipeline()
     }
     
     /// Seek to a specific time within the current chunk
