@@ -218,6 +218,14 @@ final class KokoroWorker {
         input = nil
         output = nil
     }
+    
+    func restartAsync() {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            self?.lock.lock()
+            defer { self?.lock.unlock() }
+            self?.restart(reason: "Async restart to kill stale in-flight job")
+        }
+    }
 }
 
 private extension FileHandle {

@@ -185,8 +185,9 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
             currentTime = 0
             isSpeaking = true
             isPaused = false
-            // Background prebuffer while playing
-            prebuffer(from: index + 1, count: AppConfig.backgroundPrebufferCount)
+            logger.log(level: .info, "Playback started (audio playing)")
+            // Prebuffer next segment immediately while playing
+            prebuffer(from: index + 1, count: 1)
         } catch {
             NSLog("Kokoro playback failed for segment \(index): \(error.localizedDescription)")
             currentIndex = index + 1
@@ -194,19 +195,22 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
         }
     }
 
-    /// Merge adjacent segments with the same Kokoro voice into a single
-    /// longer segment. This reduces the number of render calls and
-    /// eliminates the gaps between consecutive same-voice chunks.
+    /// Merge adjacent segments with the same Kokoro voice, up to chunkMaxLength.
+    /// This reduces render calls but prevents page-sized chunks that take 45+ seconds.
     private func mergeConsecutiveSameVoice(_ segments: [PlannedSpeechSegment]) -> [PlannedSpeechSegment] {
         guard !segments.isEmpty else { return [] }
         var merged: [PlannedSpeechSegment] = []
         var current = segments[0]
+        
         for i in 1..<segments.count {
             let next = segments[i]
-            if current.kokoroVoiceID == next.kokoroVoiceID {
-                let sep = current.text.last.flatMap { ".!?".contains($0) } == true ? " " : ". "
+            let sep = current.text.last.flatMap { ".!?".contains($0) } == true ? " " : ". "
+            let combined = current.text + sep + next.text
+            
+            // Only merge if same voice AND within chunkMaxLength
+            if current.kokoroVoiceID == next.kokoroVoiceID && combined.count <= AppConfig.chunkMaxLength {
                 current = PlannedSpeechSegment(
-                    text: current.text + sep + next.text,
+                    text: combined,
                     voiceIdentifier: current.voiceIdentifier,
                     kokoroVoiceID: current.kokoroVoiceID,
                     piperModelPath: current.piperModelPath ?? next.piperModelPath,

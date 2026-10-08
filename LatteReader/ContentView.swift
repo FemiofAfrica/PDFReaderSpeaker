@@ -1172,13 +1172,18 @@ struct ContentView: View {
     private func startEngine(text: String, rate: Double) {
         switch selectedVoiceEngine {
         case .kokoro:
-            let segments = makeSegments(for: text, kokoroVoiceID: "af_heart")
-            currentChunks = segments
-            kokoroReader.start(segments: segments, rate: rate)
+            // First segment is one sentence for fast startup, rest follow
+            let firstSegments = makeSegments(for: text, kokoroVoiceID: "af_heart", firstSentenceOnly: true)
+            let restSegments = makeSegments(for: text, kokoroVoiceID: "af_heart", firstSentenceOnly: false)
+            let allSegments = firstSegments + restSegments.dropFirst()
+            currentChunks = allSegments
+            kokoroReader.start(segments: allSegments, rate: rate)
         case .piper:
-            let segments = makeSegments(for: text, kokoroVoiceID: nil)
-            currentChunks = segments
-            piperReader.start(segments: segments, rate: rate)
+            let firstSegments = makeSegments(for: text, kokoroVoiceID: nil, firstSentenceOnly: true)
+            let restSegments = makeSegments(for: text, kokoroVoiceID: nil, firstSentenceOnly: false)
+            let allSegments = firstSegments + restSegments.dropFirst()
+            currentChunks = allSegments
+            piperReader.start(segments: allSegments, rate: rate)
         }
     }
 
@@ -1225,8 +1230,25 @@ struct ContentView: View {
     }
 
     /// Build narration segments from raw text.
-    private func makeSegments(for text: String, kokoroVoiceID: String?) -> [PlannedSpeechSegment] {
-        MultiVoiceAnalyzer.chunk(text: text).map {
+    /// First segment is one sentence (~150 chars max) for fast startup.
+    private func makeSegments(for text: String, kokoroVoiceID: String?, firstSentenceOnly: Bool = false) -> [PlannedSpeechSegment] {
+        if firstSentenceOnly {
+            // Extract first sentence for fast startup
+            let sentences = text.components(separatedBy: CharacterSet(charactersIn: ".!?"))
+            let firstSentence = sentences.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let capped = String(firstSentence.prefix(150))
+            let withPunctuation = capped + (capped.last?.isPunctuation == true ? "" : ".")
+            
+            return [PlannedSpeechSegment(
+                text: withPunctuation,
+                voiceIdentifier: nil,
+                kokoroVoiceID: kokoroVoiceID,
+                piperModelPath: MultiVoiceAnalyzer.availablePiperModels().first,
+                speakerName: "Narrator"
+            )]
+        }
+        
+        return MultiVoiceAnalyzer.chunk(text: text).map {
             PlannedSpeechSegment(text: $0, voiceIdentifier: nil, kokoroVoiceID: kokoroVoiceID, piperModelPath: MultiVoiceAnalyzer.availablePiperModels().first, speakerName: "Narrator")
         }
     }
