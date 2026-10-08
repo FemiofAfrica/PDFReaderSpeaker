@@ -1172,14 +1172,12 @@ struct ContentView: View {
     private func startEngine(text: String, rate: Double) {
         switch selectedVoiceEngine {
         case .kokoro:
-            // First segment is one sentence for fast startup, chunk remainder
-            let (first, rest) = makeSegmentsWithFastFirst(for: text, kokoroVoiceID: "af_heart")
-            let allSegments = [first] + rest
+            // Ramped segments: ~150, ~250, then ~350 chars
+            let allSegments = makeSegmentsWithRampedStart(for: text, kokoroVoiceID: "af_heart")
             currentChunks = allSegments
             kokoroReader.start(segments: allSegments, rate: rate)
         case .piper:
-            let (first, rest) = makeSegmentsWithFastFirst(for: text, kokoroVoiceID: nil)
-            let allSegments = [first] + rest
+            let allSegments = makeSegmentsWithRampedStart(for: text, kokoroVoiceID: nil)
             currentChunks = allSegments
             piperReader.start(segments: allSegments, rate: rate)
         }
@@ -1228,13 +1226,42 @@ struct ContentView: View {
     }
 
     /// Build narration segments from raw text.
-    /// Returns (firstSegment, remainderSegments) for fast startup.
-    private func makeSegmentsWithFastFirst(for text: String, kokoroVoiceID: String?) -> (first: PlannedSpeechSegment, rest: [PlannedSpeechSegment]) {
-        // Find first sentence boundary, avoiding "Mr.", "Dr.", "3.5"
+    /// Returns (firstSegment, secondSegment, remainderSegments) for ramped startup.
+    /// First ~150 chars, second ~250 chars, rest ~350 chars.
+    private func makeSegmentsWithRampedStart(for text: String, kokoroVoiceID: String?) -> [PlannedSpeechSegment] {
+        guard !text.isEmpty else { return [] }
+        
+        // Extract first sentence or ~150 chars at word boundary
+        let (firstText, afterFirst) = extractSegment(from: text, maxLength: 150)
+        guard !afterFirst.isEmpty else {
+            return [makeSingleSegment(text: firstText, kokoroVoiceID: kokoroVoiceID)]
+        }
+        
+        // Extract second segment ~250 chars
+        let (secondText, afterSecond) = extractSegment(from: afterFirst, maxLength: 250)
+        guard !afterSecond.isEmpty else {
+            return [
+                makeSingleSegment(text: firstText, kokoroVoiceID: kokoroVoiceID),
+                makeSingleSegment(text: secondText, kokoroVoiceID: kokoroVoiceID)
+            ]
+        }
+        
+        // Chunk remainder at 350 chars
+        let restSegments = MultiVoiceAnalyzer.chunk(text: afterSecond, maxLength: AppConfig.chunkMaxLength).map {
+            makeSingleSegment(text: $0, kokoroVoiceID: kokoroVoiceID)
+        }
+        
+        return [
+            makeSingleSegment(text: firstText, kokoroVoiceID: kokoroVoiceID),
+            makeSingleSegment(text: secondText, kokoroVoiceID: kokoroVoiceID)
+        ] + restSegments
+    }
+    
+    private func extractSegment(from text: String, maxLength: Int) -> (segment: String, remainder: String) {
         var endIndex = text.startIndex
         var foundSentenceEnd = false
         
-        // Scan characters instead of regex (Swift 5 compatibility)
+        // Find first sentence boundary, avoiding "Mr.", "Dr.", "3.5"
         var i = text.startIndex
         while i < text.endIndex {
             let char = text[i]
@@ -1250,33 +1277,31 @@ struct ContentView: View {
             i = text.index(after: i)
         }
         
-        // If no sentence boundary or too long, take ~150 chars at word boundary
-        if !foundSentenceEnd || text.distance(from: text.startIndex, to: endIndex) > 200 {
-            let target = text.index(text.startIndex, offsetBy: min(150, text.count), limitedBy: text.endIndex) ?? text.endIndex
+        // If no sentence boundary or too long, take maxLength chars at word boundary
+        if !foundSentenceEnd || text.distance(from: text.startIndex, to: endIndex) > maxLength + 50 {
+            let target = text.index(text.startIndex, offsetBy: min(maxLength, text.count), limitedBy: text.endIndex) ?? text.endIndex
             // Find word boundary before target
             endIndex = text[..<target].lastIndex(where: { $0.isWhitespace }) ?? target
         }
         
-        let firstText = String(text[..<endIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let segmentText = String(text[..<endIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
         let remainderText = String(text[endIndex...]).trimmingCharacters(in: .whitespacesAndNewlines)
         
-        let firstSegment = PlannedSpeechSegment(
-            text: firstText,
+        return (segmentText, remainderText)
+    }
+    
+    private func makeSingleSegment(text: String, kokoroVoiceID: String?) -> PlannedSpeechSegment {
+        return PlannedSpeechSegment(
+            text: text,
             voiceIdentifier: nil,
             kokoroVoiceID: kokoroVoiceID,
             piperModelPath: MultiVoiceAnalyzer.availablePiperModels().first,
             speakerName: "Narrator"
         )
-        
-        let restSegments = remainderText.isEmpty ? [] : MultiVoiceAnalyzer.chunk(text: remainderText).map {
-            PlannedSpeechSegment(text: $0, voiceIdentifier: nil, kokoroVoiceID: kokoroVoiceID, piperModelPath: MultiVoiceAnalyzer.availablePiperModels().first, speakerName: "Narrator")
-        }
-        
-        return (firstSegment, restSegments)
     }
     
     private func makeSegments(for text: String, kokoroVoiceID: String?) -> [PlannedSpeechSegment] {
-        return MultiVoiceAnalyzer.chunk(text: text).map {
+        return MultiVoiceAnalyzer.chunk(text: text, maxLength: AppConfig.chunkMaxLength).map {
             PlannedSpeechSegment(text: $0, voiceIdentifier: nil, kokoroVoiceID: kokoroVoiceID, piperModelPath: MultiVoiceAnalyzer.availablePiperModels().first, speakerName: "Narrator")
         }
     }

@@ -84,7 +84,7 @@ final class KokoroWorker {
             "lang": "en-us"
         ]
         let data = try JSONSerialization.data(withJSONObject: payload)
-        logger.log(level: .info, "Job written to worker stdin (\(segment.text.prefix(50), privacy: .public)...)")
+        logger.notice("Job written to worker stdin (\(segment.text.prefix(50), privacy: .public)...)")
         input.write(data)
         input.write(Data("\n".utf8))
         

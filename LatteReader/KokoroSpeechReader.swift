@@ -155,7 +155,7 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
         currentIndex = index
         // Bump generation to drop stale renders from old position
         generationID = UUID()
-        logger.log(level: .info, "Skip: new generationID to drop stale work")
+        logger.notice("Skip: new generationID to drop stale work")
         
         // If job in flight, restart worker
         let hasJobInFlight = stateQueue.sync { jobInFlight }
@@ -208,7 +208,7 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
             currentTime = 0
             isSpeaking = true
             isPaused = false
-            logger.log(level: .info, "Playback started (audio playing)")
+            logger.notice("Playback started (audio playing)")
             // Prebuffer next segment immediately while playing
             prebuffer(from: index + 1, count: 1)
         } catch {
@@ -307,7 +307,7 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
                 if primarySynthesizer.availability.isAvailable {
                     try primarySynthesizer.synthesize(segment: segment, outputURL: outputURL, isStillCurrent: isStillCurrent)
                 } else {
-                    logger.log(level: .info, "Kokoro unavailable, falling back to Piper")
+                    logger.notice("Kokoro unavailable, falling back to Piper")
                     try fallbackSynthesizer.synthesize(segment: segment, outputURL: outputURL, isStillCurrent: isStillCurrent)
                 }
                 
@@ -316,7 +316,7 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
                 
                 // Re-check generation AFTER synthesize returns, before touching state
                 guard expectedGenerationID == self.generationID else {
-                    logger.log(level: .info, "Stale job completed but generation changed, discarding result")
+                    logger.notice("Stale job completed but generation changed, discarding result")
                     self.stateQueue.sync {
                         self.renderingIndices.remove(index)
                     }
