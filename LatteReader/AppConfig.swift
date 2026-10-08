@@ -32,7 +32,10 @@ enum AppConfig {
     // MARK: - Playback
     
     static let progressTimerInterval: TimeInterval = 0.25
-    static let chunkMaxLength = 3_500
+    
+    /// Sentence-sized chunks for fast first-audio startup
+    /// Small chunks (250-400 chars) mean first render completes in ~1-2s
+    static let chunkMaxLength = 350
     
     // Streaming playback: start fast, buffer in background
     static let initialPrebufferCount = 1  // Just first chunk for fast startup

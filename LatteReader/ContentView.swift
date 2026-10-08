@@ -123,10 +123,12 @@ struct ContentView: View {
             switch selectedVoiceEngine {
             case .kokoro where kokoroReader.duration > 0:
                 kokoroReader.refreshProgress()
-                playbackProgress = min(1, kokoroReader.currentTime / kokoroReader.duration)
+                let progress = kokoroReader.currentTime / kokoroReader.duration
+                playbackProgress = progress.isFinite ? min(1, max(0, progress)) : 0
                 updateHighlightForKokoro()
             case .piper where piperReader.duration > 0:
-                playbackProgress = min(1, piperReader.currentTime / piperReader.duration)
+                let progress = piperReader.currentTime / piperReader.duration
+                playbackProgress = progress.isFinite ? min(1, max(0, progress)) : 0
                 updateHighlightForPiper()
             default:
                 break
@@ -964,38 +966,73 @@ struct ContentView: View {
     }
     
     private func startFromSelection(_ pdfSelection: PDFSelection, selectionText: String, pdf: LoadedPDF) {
-        // Find where the selection ends to continue from there
-        let (restOfDocument, shouldContinue) = textAfterSelection(pdfSelection, in: pdf)
+        NSLog("[LatteTiming] Play from selection pressed")
+        let startTime = CFAbsoluteTimeGetCurrent()
         
-        // Build segments for selection using appropriate voice
-        let selectionSegments = buildSegments(for: selectionText, pdf: pdf, startPage: nil)
+        // Get selection's ending page for lazy continuation
+        guard let document = pdfDocument,
+              let lastPage = pdfSelection.pages.last else {
+            errorMessage = "Could not determine selection position."
+            return
+        }
         
-        // Build segments for continuation if there's more text
-        let continuationSegments = shouldContinue && !restOfDocument.isEmpty 
-            ? buildSegments(for: restOfDocument, pdf: pdf, startPage: nil)
-            : []
+        let lastPageIndex = document.index(for: lastPage)
+        guard lastPageIndex != NSNotFound else {
+            errorMessage = "Selection page not found."
+            return
+        }
         
-        let allSegments = selectionSegments + continuationSegments
+        // FAST STARTUP: Only segment selection + remainder of its page initially
+        let (restOfPage, _) = textAfterSelectionOnSamePage(pdfSelection, pageIndex: lastPageIndex, in: pdf)
+        let initialText = selectionText + (restOfPage.isEmpty ? "" : "\n\n" + restOfPage)
+        
+        // Store state for lazy continuation
+        lastPlayedPageIndex = lastPageIndex
+        documentForContinuation = pdf
+        
+        NSLog("[LatteTiming] Selection + rest of page extracted (\(initialText.count) chars) in \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - startTime))s")
+        
+        // Build segments for initial text only
+        let allSegments = buildSegments(for: initialText, pdf: pdf, startPage: nil)
         currentChunks = allSegments
+        
+        NSLog("[LatteTiming] Segments built (\(allSegments.count) segments) in \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - startTime))s")
         
         switch selectedVoiceEngine {
         case .kokoro:
             kokoroReader.start(segments: allSegments, rate: playbackSpeed)
+            NSLog("[LatteTiming] First job sent in \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - startTime))s")
         case .piper:
             piperReader.start(segments: allSegments, rate: playbackSpeed)
+            NSLog("[LatteTiming] First job sent in \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - startTime))s")
         }
         
         isPlaying = true
+        
+        // Background: append next page after a short delay
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.appendNextPageIfNeeded()
+        }
     }
     
     private func startFromCurrentPage(pdf: LoadedPDF, currentPage: Int) {
-        // Build text from current page forward through the end of the document
-        let text = textFromPage(currentPage, through: pdf.pageCount - 1, in: pdf)
+        NSLog("[LatteTiming] Play pressed (page \(currentPage + 1))")
+        let startTime = CFAbsoluteTimeGetCurrent()
+        
+        // FAST STARTUP: Only segment current page initially
+        // Background: append next pages during playback
+        let text = textFromPage(currentPage, through: currentPage, in: pdf)
         
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             errorMessage = "No text to read from current page."
             return
         }
+        
+        // Store state for lazy continuation
+        lastPlayedPageIndex = currentPage
+        documentForContinuation = pdf
+        
+        NSLog("[LatteTiming] Text extracted (\(text.count) chars) in \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - startTime))s")
         
         if selectedPlaybackMode == .multiVoice {
             let pageNum: Int?
@@ -1021,11 +1058,22 @@ struct ContentView: View {
             }
             selectedVoiceEngine = .kokoro
             currentChunks = segments
+            let jobSentTime = CFAbsoluteTimeGetCurrent()
+            NSLog("[LatteTiming] Segments built (\(segments.count) segments) in \(String(format: "%.3f", jobSentTime - startTime))s")
             kokoroReader.start(segments: segments, rate: playbackSpeed)
+            NSLog("[LatteTiming] First job sent in \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - startTime))s")
         } else {
+            let jobSentTime = CFAbsoluteTimeGetCurrent()
+            NSLog("[LatteTiming] Single-voice mode, starting engine in \(String(format: "%.3f", jobSentTime - startTime))s")
             startEngine(text: text, rate: playbackSpeed)
+            NSLog("[LatteTiming] First job sent in \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - startTime))s")
         }
         isPlaying = true
+        
+        // Background: append next page after a short delay to allow first chunk to start
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.appendNextPageIfNeeded()
+        }
     }
     
     /// Get text from a range of pages
@@ -1037,7 +1085,24 @@ struct ContentView: View {
             .joined(separator: "\n\n")
     }
     
-    /// Extract text after a selection: remainder of selection's last page + following pages
+    /// Extract text after a selection on the same page only (for fast startup)
+    private func textAfterSelectionOnSamePage(_ selection: PDFSelection, pageIndex: Int, in pdf: LoadedPDF) -> (String, Bool) {
+        guard let document = pdfDocument,
+              let lastPage = selection.pages.last,
+              let pageText = lastPage.string else {
+            return ("", false)
+        }
+        
+        let selectionText = selection.string ?? ""
+        if let range = pageText.range(of: selectionText, options: [.caseInsensitive, .diacriticInsensitive]) {
+            let afterSelection = String(pageText[range.upperBound...])
+            return (afterSelection, true)
+        }
+        
+        return ("", false)
+    }
+    
+    /// Extract text after a selection: remainder of selection's last page + following pages (unused, for reference)
     private func textAfterSelection(_ selection: PDFSelection, in pdf: LoadedPDF) -> (String, Bool) {
         guard let document = pdfDocument,
               let lastPage = selection.pages.last else {
