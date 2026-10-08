@@ -225,16 +225,17 @@ final class KokoroWorker {
     /// The blocked read will fail, then we relaunch under the lock.
     func terminateWorkerProcess() {
         // Terminate process directly (non-blocking)
-        if let process = process, process.isRunning {
+        if let process = self.process, process.isRunning {
             process.terminate()
-            logger.notice("Terminated worker process PID \(process.processIdentifier, privacy: .public)")
+            self.logger.notice("Terminated worker process PID \(process.processIdentifier, privacy: .public)")
         }
         
         // Relaunch in background after brief delay to ensure termination completes
         DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.1) { [weak self] in
-            self?.lock.lock()
-            defer { self?.lock.unlock() }
-            self?.restart(reason: "Relaunch after process termination")
+            guard let self = self else { return }
+            self.lock.lock()
+            defer { self.lock.unlock() }
+            self.restart(reason: "Relaunch after process termination")
         }
     }
 }

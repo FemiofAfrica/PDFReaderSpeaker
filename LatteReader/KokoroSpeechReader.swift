@@ -70,7 +70,7 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
         )
         guard !merged.isEmpty else { return }
         queue.append(contentsOf: merged)
-        logger.notice("Appended \(merged.count, privacy: .public) segments (total \(queue.count, privacy: .public))")
+        logger.notice("Appended \(merged.count, privacy: .public) segments (total \(self.queue.count, privacy: .public))")
         fillRenderPipeline()
     }
 
@@ -251,21 +251,21 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
     /// Renders up to 3 segments ahead of the playhead when the worker is idle.
     private func fillRenderPipeline() {
         let (rendered, rendering) = stateQueue.sync {
-            (renderedAudio.keys.sorted(), renderingIndices.sorted())
+            (self.renderedAudio.keys.sorted(), self.renderingIndices.sorted())
         }
         
         // Count buffered segments ahead of current position
-        let bufferedAhead = rendered.filter { $0 > currentIndex }.count + 
-                           rendering.filter { $0 > currentIndex }.count
+        let bufferedAhead = rendered.filter { $0 > self.currentIndex }.count + 
+                           rendering.filter { $0 > self.currentIndex }.count
         
         // If we have < 3 buffered ahead, find the next segment to render
         if bufferedAhead < 3 {
             let allRenderedOrRendering = Set(rendered).union(rendering)
             
             // Find first unrendered segment starting from current index
-            for i in currentIndex..<queue.count {
+            for i in self.currentIndex..<self.queue.count {
                 if !allRenderedOrRendering.contains(i) {
-                    renderSegment(at: i, generationID: generationID, completion: nil)
+                    self.renderSegment(at: i, generationID: self.generationID, completion: nil)
                     // After starting one, check again to fill more if needed
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
                         self?.fillRenderPipeline()
