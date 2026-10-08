@@ -108,7 +108,17 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
     }
 
     func stop() {
+        // Bump generation first to invalidate in-flight renders
         generationID = UUID()
+        logger.log(level: .info, "Stop: new generationID to drop stale work")
+        
+        // If there's a job in flight, restart worker to kill it immediately
+        let hasInflightJob = stateQueue.sync { !renderingIndices.isEmpty }
+        if hasInflightJob {
+            logger.log(level: .info, "In-flight job detected, restarting worker to avoid blocking")
+            restartWorkerAsync()
+        }
+        
         player?.stop()
         player = nil
         queue.removeAll()
@@ -127,6 +137,12 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
             try? FileManager.default.removeItem(at: tempDirectory)
         }
         tempDirectory = nil
+    }
+    
+    private func restartWorkerAsync() {
+        DispatchQueue.global(qos: .userInitiated).async {
+            KokoroWorker.shared.restartAsync()
+        }
     }
 
     func refreshProgress() {
