@@ -46,11 +46,7 @@ final class SpeechHighlighter: ObservableObject {
         for pageIndex in startPage..<endPage {
             guard let page = document.page(at: pageIndex) else { continue }
             
-            // PDFKit's findString returns all matches on the page
-            let selections = page.selection(for: searchText, options: [.caseInsensitive])
-            
-            if let selection = selections, selection.pages.count > 0 {
-                // Found it! Apply highlight
+            if let selection = findTextOnPage(searchText, page: page) {
                 applyHighlight(selection, pageIndex: pageIndex)
                 return
             }
@@ -60,9 +56,8 @@ final class SpeechHighlighter: ObservableObject {
         if startPage > 0 {
             for pageIndex in 0..<startPage {
                 guard let page = document.page(at: pageIndex) else { continue }
-                let selections = page.selection(for: searchText, options: [.caseInsensitive])
                 
-                if let selection = selections, selection.pages.count > 0 {
+                if let selection = findTextOnPage(searchText, page: page) {
                     applyHighlight(selection, pageIndex: pageIndex)
                     return
                 }
@@ -71,6 +66,20 @@ final class SpeechHighlighter: ObservableObject {
         
         // Text not found - clear highlight
         clearHighlight()
+    }
+    
+    /// Find text on a specific page and return a PDFSelection
+    private func findTextOnPage(_ searchText: String, page: PDFPage) -> PDFSelection? {
+        guard let pageString = page.string else { return nil }
+        
+        // Use NSString for case-insensitive search
+        let nsString = pageString as NSString
+        let range = nsString.range(of: searchText, options: .caseInsensitive)
+        
+        guard range.location != NSNotFound else { return nil }
+        
+        // Create selection from the found range
+        return page.selection(for: range)
     }
     
     /// Highlight a specific word range (for system voice)
@@ -104,7 +113,7 @@ final class SpeechHighlighter: ObservableObject {
             
             // Then scroll to the selection
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak pdfView] in
-                if let bounds = selection.bounds(for: page) {
+                if let bounds = selection.boundsForPage(page) {
                     pdfView?.go(to: bounds, on: page)
                 }
             }
@@ -181,7 +190,8 @@ extension SpeechHighlighter {
 
 /// PDFSelection extension for bounds calculation
 extension PDFSelection {
-    func bounds(for page: PDFPage) -> CGRect? {
+    func boundsForPage(_ page: PDFPage) -> CGRect? {
+        // PDFSelection.bounds(for:) returns the bounds of the selection on the given page
         guard pages.contains(page) else { return nil }
         return bounds(for: page)
     }
