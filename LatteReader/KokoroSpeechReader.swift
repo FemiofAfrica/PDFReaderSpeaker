@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import OSLog
 
 final class KokoroSpeechReader: NSObject, ObservableObject {
     @Published private(set) var isSpeaking = false
@@ -26,10 +27,11 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
     private var failedIndices = Set<Int>()
     private var pendingCallbacks: [Int: [() -> Void]] = [:]
     private var generationID = UUID()
-    private let renderQueue = DispatchQueue(label: "LatteReader.KokoroRender", qos: .userInitiated, attributes: .concurrent)
+    private let renderQueue = DispatchQueue(label: "LatteReader.KokoroRender", qos: .userInitiated)
     private let stateQueue = DispatchQueue(label: "LatteReader.KokoroState")
     private let primarySynthesizer: VoiceSynthesizer
     private let fallbackSynthesizer: VoiceSynthesizer
+    private let logger = Logger(subsystem: "com.femiofafrica.lattereader", category: "timing")
 
     var availability: VoiceEngineAvailability { primarySynthesizer.availability }
     var voices: [KokoroVoice] { (primarySynthesizer as? KokoroVoiceEngine)?.availableVoices ?? [] }
@@ -136,7 +138,7 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
         currentIndex = index
         // Bump generation to drop stale renders from old position
         generationID = UUID()
-        NSLog("[LatteTiming] Skip: new generationID to drop stale work")
+        logger.log(level: .info, "Skip: new generationID to drop stale work")
         playWhenReady(index: index, generationID: generationID)
     }
     
@@ -256,20 +258,20 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
         renderQueue.async { [weak self] in
             guard let self else { return }
             
-            // Double-check generation before expensive render
-            guard expectedGenerationID == self.generationID else {
-                NSLog("[LatteTiming] Dropping render job at worker call (stale generation)")
-                completion?()
-                return
-            }
-            
             do {
                 let outputURL = try self.makeOutputURL(index: index)
+                
+                // Pass generation check closure to be evaluated AFTER lock acquisition
+                let isStillCurrent = { [weak self] in
+                    guard let self = self else { return false }
+                    return expectedGenerationID == self.generationID
+                }
+                
                 if primarySynthesizer.availability.isAvailable {
-                    try primarySynthesizer.synthesize(segment: segment, outputURL: outputURL)
+                    try primarySynthesizer.synthesize(segment: segment, outputURL: outputURL, isStillCurrent: isStillCurrent)
                 } else {
-                    NSLog("Kokoro unavailable: \(primarySynthesizer.availability.message). Falling back to Piper.")
-                    try fallbackSynthesizer.synthesize(segment: segment, outputURL: outputURL)
+                    logger.log(level: .info, "Kokoro unavailable, falling back to Piper")
+                    try fallbackSynthesizer.synthesize(segment: segment, outputURL: outputURL, isStillCurrent: isStillCurrent)
                 }
                 self.stateQueue.sync {
                     self.renderedAudio[index] = outputURL

@@ -33,7 +33,10 @@ struct ContentView: View {
     @State private var lastPlayedPageIndex: Int?
     @State private var documentForContinuation: LoadedPDF?
     @State private var continuationTimer: Timer?
+    @State private var pausedPageIndex: Int?
 
+    private let logger = Logger(subsystem: "com.femiofafrica.lattereader", category: "timing")
+    
     private var activeProxy: PDFViewProxy {
         selectedReadMode == .pageByPage ? pdfProxyPage : pdfProxy
     }
@@ -867,20 +870,16 @@ struct ContentView: View {
                 }
                 .buttonStyle(PrimaryTransportBtnStyle())
 
-                // Pause
+                // Stop
                 Button {
-                    pausePlayback()
+                    stopPlayback()
                 } label: {
-                    HStack(spacing: 4) {
-                        RoundedRectangle(cornerRadius: 2)
-                            .fill(Color(red: 0.78, green: 0.82, blue: 0.76).opacity(0.8))
-                            .frame(width: 4, height: 16)
-                        RoundedRectangle(cornerRadius: 2)
-                            .fill(Color(red: 0.78, green: 0.82, blue: 0.76).opacity(0.8))
-                            .frame(width: 4, height: 16)
-                    }
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(Color(red: 0.78, green: 0.82, blue: 0.76).opacity(0.8))
+                        .frame(width: 16, height: 16)
                 }
                 .buttonStyle(TransportBtnStyle())
+                .help("Stop")
                 
                 // Skip forward (sentence)
                 Button {
@@ -949,9 +948,22 @@ struct ContentView: View {
 
     private func togglePlayback() {
         guard let loadedPDF else { return }
+        
+        // Check if we can resume from pause
+        let reader = selectedVoiceEngine == .kokoro ? kokoroReader : piperReader
+        if reader.isPaused {
+            // Resume from pause
+            reader.pauseOrContinue()
+            isPlaying = true
+            startContinuationPolling()
+            return
+        }
+        
         if isPlaying {
+            // Pause
             pausePlayback()
         } else {
+            // Fresh start
             startPlayback(for: loadedPDF)
         }
     }
@@ -969,7 +981,7 @@ struct ContentView: View {
     }
     
     private func startFromSelection(_ pdfSelection: PDFSelection, selectionText: String, pdf: LoadedPDF) {
-        NSLog("[LatteTiming] Play from selection pressed")
+        logger.log(level: .info, "Play from selection pressed")
         let startTime = CFAbsoluteTimeGetCurrent()
         
         // Get selection's ending page for lazy continuation
@@ -993,21 +1005,21 @@ struct ContentView: View {
         lastPlayedPageIndex = lastPageIndex
         documentForContinuation = pdf
         
-        NSLog("[LatteTiming] Selection + rest of page extracted (\(initialText.count) chars) in \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - startTime))s")
+        logger.log(level: .info, "Selection + rest of page extracted (\(initialText.count, privacy: .public) chars) in \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - startTime), privacy: .public)s")
         
         // Build segments for initial text only
         let allSegments = buildSegments(for: initialText, pdf: pdf, startPage: nil)
         currentChunks = allSegments
         
-        NSLog("[LatteTiming] Segments built (\(allSegments.count) segments) in \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - startTime))s")
+        logger.log(level: .info, "Segments built (\(allSegments.count, privacy: .public) segments) in \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - startTime), privacy: .public)s")
         
         switch selectedVoiceEngine {
         case .kokoro:
             kokoroReader.start(segments: allSegments, rate: playbackSpeed)
-            NSLog("[LatteTiming] First job sent in \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - startTime))s")
+            logger.log(level: .info, "Playback started in \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - startTime), privacy: .public)s")
         case .piper:
             piperReader.start(segments: allSegments, rate: playbackSpeed)
-            NSLog("[LatteTiming] First job sent in \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - startTime))s")
+            logger.log(level: .info, "Playback started in \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - startTime), privacy: .public)s")
         }
         
         isPlaying = true
@@ -1017,7 +1029,7 @@ struct ContentView: View {
     }
     
     private func startFromCurrentPage(pdf: LoadedPDF, currentPage: Int) {
-        NSLog("[LatteTiming] Play pressed (page \(currentPage + 1))")
+        logger.log(level: .info, "Play pressed (page \(currentPage + 1, privacy: .public))")
         let startTime = CFAbsoluteTimeGetCurrent()
         
         // FAST STARTUP: Only segment current page initially
@@ -1033,7 +1045,7 @@ struct ContentView: View {
         lastPlayedPageIndex = currentPage
         documentForContinuation = pdf
         
-        NSLog("[LatteTiming] Text extracted (\(text.count) chars) in \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - startTime))s")
+        logger.log(level: .info, "Text extracted (\(text.count, privacy: .public) chars) in \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - startTime), privacy: .public)s")
         
         if selectedPlaybackMode == .multiVoice {
             let pageNum: Int?
@@ -1269,7 +1281,7 @@ struct ContentView: View {
             return
         }
         
-        // Check if we're near the end of current segments (last 2 chunks)
+        // Check if we're near the end of current segments (last 4 chunks for smoother transition)
         let currentChunkIndex: Int
         let totalChunks: Int
         
@@ -1282,12 +1294,12 @@ struct ContentView: View {
             totalChunks = piperReader.totalChunks
         }
         
-        // If we're within 2 chunks of the end, append next page
-        guard totalChunks - currentChunkIndex <= 2 else {
+        // Append next page earlier (when 4 chunks remaining) to avoid gaps
+        guard totalChunks - currentChunkIndex <= 4 else {
             return
         }
         
-        NSLog("[LatteTiming] Appending page \(lastPage + 2) lazily (chunk \(currentChunkIndex + 1)/\(totalChunks))")
+        logger.log(level: .info, "Appending page \(lastPage + 2, privacy: .public) lazily (chunk \(currentChunkIndex + 1, privacy: .public)/\(totalChunks, privacy: .public))")
         let nextPageStartTime = CFAbsoluteTimeGetCurrent()
         
         // Get next page text
@@ -1298,12 +1310,12 @@ struct ContentView: View {
             return
         }
         
-        NSLog("[LatteTiming] Next page text extracted (\(nextPageText.count) chars) in \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - nextPageStartTime))s")
+        logger.log(level: .info, "Next page text extracted (\(nextPageText.count, privacy: .public) chars) in \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - nextPageStartTime), privacy: .public)s")
         
         // Build segments for next page
         let segments = buildSegments(for: nextPageText, pdf: pdf, startPage: lastPage + 1)
         
-        NSLog("[LatteTiming] Next page segments built (\(segments.count) segments) in \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - nextPageStartTime))s")
+        logger.log(level: .info, "Next page segments built (\(segments.count, privacy: .public) segments) in \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - nextPageStartTime), privacy: .public)s")
         
         // Append to engine
         switch selectedVoiceEngine {
@@ -1313,7 +1325,7 @@ struct ContentView: View {
             piperReader.append(segments: segments)
         }
         
-        NSLog("[LatteTiming] Next page appended in \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - nextPageStartTime))s")
+        logger.log(level: .info, "Next page appended in \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - nextPageStartTime), privacy: .public)s")
         
         // Update last played page
         lastPlayedPageIndex = lastPage + 1

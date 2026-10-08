@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 
 struct VoiceEngineAvailability: Hashable {
     let isAvailable: Bool
@@ -51,6 +52,7 @@ final class KokoroWorker {
     private var process: Process?
     private var input: FileHandle?
     private var output: FileHandle?
+    private let logger = Logger(subsystem: "com.femiofafrica.lattereader", category: "timing")
 
     private var executablePath: String? {
         AppConfig.findExecutable(in: AppConfig.kokoroWorkerPaths)
@@ -58,11 +60,18 @@ final class KokoroWorker {
 
     var isAvailable: Bool { executablePath != nil }
 
-    func synthesize(segment: PlannedSpeechSegment, outputURL: URL) throws {
+    func synthesize(segment: PlannedSpeechSegment, outputURL: URL, isStillCurrent: () -> Bool) throws {
         lock.lock()
         defer { lock.unlock() }
 
         try ensureStarted()
+        
+        // Check generation AFTER acquiring lock to drop stale work
+        guard isStillCurrent() else {
+            logger.log(level: .info, "Stale job dropped after lock (segment no longer current)")
+            return
+        }
+        
         guard let input, let output else { throw CocoaError(.executableLoad) }
 
         let payload: [String: Any] = [
@@ -73,6 +82,7 @@ final class KokoroWorker {
             "lang": "en-us"
         ]
         let data = try JSONSerialization.data(withJSONObject: payload)
+        logger.log(level: .info, "Job written to worker stdin (\(segment.text.prefix(50), privacy: .public)...)")
         input.write(data)
         input.write(Data("\n".utf8))
 
@@ -81,9 +91,12 @@ final class KokoroWorker {
               let response = try JSONSerialization.jsonObject(with: responseData) as? [String: Any],
               response["ok"] as? Bool == true,
               FileManager.default.fileExists(atPath: outputURL.path) else {
-            restart()
+            logger.log(level: .error, "Worker response failed, restarting")
+            restart(reason: "Bad response or missing output file")
             throw CocoaError(.executableLoad)
         }
+        
+        logger.log(level: .info, "Audio ready from worker")
     }
 
     private static func prepareTextForSpeech(_ text: String) -> String {
@@ -171,13 +184,19 @@ final class KokoroWorker {
             startGroup.leave()
         }
         
-        if startGroup.wait(timeout: .now() + 5.0) == .timedOut || !(readyLine?.contains("ready") ?? false) {
-            restart()
+        // Increased timeout from 5s to 30s for cold model loading on busy CPU
+        if startGroup.wait(timeout: .now() + 30.0) == .timedOut || !(readyLine?.contains("ready") ?? false) {
+            let reason = startGroup.wait(timeout: .now()) == .timedOut ? "Ready timeout (30s)" : "No ready line"
+            logger.log(level: .error, "Worker startup failed: \(reason, privacy: .public)")
+            restart(reason: reason)
             throw CocoaError(.executableLoad)
         }
+        
+        logger.log(level: .info, "Worker started and ready")
     }
 
-    private func restart() {
+    private func restart(reason: String) {
+        logger.log(level: .info, "Restarting worker: \(reason, privacy: .public)")
         try? input?.close()
         if let process, process.isRunning {
             process.terminate()
