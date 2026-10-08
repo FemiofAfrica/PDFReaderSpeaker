@@ -52,7 +52,7 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
 
     func start(segments: [PlannedSpeechSegment], rate _: Double = 1.0) {
         stop()
-        enqueue(segments)
+        enqueue(segments, preserveFirstSegment: true)
         guard !queue.isEmpty else { return }
         isSpeaking = true
         isPaused = false
@@ -110,15 +110,15 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
 
     func stop() {
         // Bump generation first to invalidate in-flight renders
-        let oldGenerationID = generationID
         generationID = UUID()
         logger.log(level: .info, "Stop: new generationID to drop stale work")
         
         // If there's a job in flight at the worker, restart worker to kill it immediately
-        if jobInFlight {
+        let hasJobInFlight = stateQueue.sync { jobInFlight }
+        if hasJobInFlight {
             logger.log(level: .info, "Killed in-flight stale job, restarting worker")
             KokoroWorker.shared.restartAsync()
-            jobInFlight = false
+            stateQueue.sync { jobInFlight = false }
         }
         
         player?.stop()
@@ -157,10 +157,11 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
         logger.log(level: .info, "Skip: new generationID to drop stale work")
         
         // If job in flight, restart worker
-        if jobInFlight {
+        let hasJobInFlight = stateQueue.sync { jobInFlight }
+        if hasJobInFlight {
             logger.log(level: .info, "Killed in-flight stale job, restarting worker")
             KokoroWorker.shared.restartAsync()
-            jobInFlight = false
+            stateQueue.sync { jobInFlight = false }
         }
         
         playWhenReady(index: index, generationID: generationID)
@@ -296,7 +297,7 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
                 }
                 
                 // Mark job in flight before calling worker
-                self.jobInFlight = true
+                self.stateQueue.sync { self.jobInFlight = true }
                 
                 if primarySynthesizer.availability.isAvailable {
                     try primarySynthesizer.synthesize(segment: segment, outputURL: outputURL, isStillCurrent: isStillCurrent)
@@ -306,7 +307,7 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
                 }
                 
                 // Job returned, clear in-flight flag
-                self.jobInFlight = false
+                self.stateQueue.sync { self.jobInFlight = false }
                 
                 // Re-check generation AFTER synthesize returns, before touching state
                 guard expectedGenerationID == self.generationID else {
@@ -328,12 +329,12 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
                 }
             } catch is CancellationError {
                 // Job was cancelled (stale generation), don't log as failure
-                self.jobInFlight = false
                 self.stateQueue.sync {
+                    self.jobInFlight = false
                     self.renderingIndices.remove(index)
                 }
             } catch {
-                self.jobInFlight = false
+                self.stateQueue.sync { self.jobInFlight = false }
                 NSLog("Kokoro/Piper render failed for \(segment.speakerName): \(error.localizedDescription)")
                 
                 // Re-check generation before recording failure

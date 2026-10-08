@@ -1234,16 +1234,20 @@ struct ContentView: View {
         var endIndex = text.startIndex
         var foundSentenceEnd = false
         
-        for match in text.matches(of: /[.!?]/) {
-            let dotIndex = match.range.lowerBound
-            let nextIndex = text.index(after: dotIndex)
-            
-            // Check if it's end of sentence (followed by space/newline/end, not lowercase)
-            if nextIndex >= text.endIndex || text[nextIndex].isWhitespace || text[nextIndex].isUppercase {
-                endIndex = nextIndex
-                foundSentenceEnd = true
-                break
+        // Scan characters instead of regex (Swift 5 compatibility)
+        var i = text.startIndex
+        while i < text.endIndex {
+            let char = text[i]
+            if char == "." || char == "!" || char == "?" {
+                let nextIndex = text.index(after: i)
+                // Check if it's end of sentence (followed by space/newline/end, not lowercase)
+                if nextIndex >= text.endIndex || text[nextIndex].isWhitespace || text[nextIndex].isUppercase {
+                    endIndex = nextIndex
+                    foundSentenceEnd = true
+                    break
+                }
             }
+            i = text.index(after: i)
         }
         
         // If no sentence boundary or too long, take ~150 chars at word boundary
