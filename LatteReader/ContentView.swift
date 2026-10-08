@@ -972,7 +972,7 @@ struct ContentView: View {
     }
     
     private func startFromSelection(_ pdfSelection: PDFSelection, selectionText: String, pdf: LoadedPDF) {
-        logger.log(level: .info, "Play from selection pressed")
+        logger.notice("Play from selection pressed")
         let startTime = CFAbsoluteTimeGetCurrent()
         
         // Get selection's ending page for lazy continuation
@@ -1020,7 +1020,7 @@ struct ContentView: View {
     }
     
     private func startFromCurrentPage(pdf: LoadedPDF, currentPage: Int) {
-        logger.log(level: .info, "Play pressed (page \(currentPage + 1, privacy: .public))")
+        logger.notice("Play pressed (page \(currentPage + 1, privacy: .public))")
         let startTime = CFAbsoluteTimeGetCurrent()
         
         // FAST STARTUP: Only segment current page initially
@@ -1368,7 +1368,7 @@ struct ContentView: View {
             return
         }
         
-        logger.log(level: .info, "Appending page \(lastPage + 2, privacy: .public) lazily (chunk \(currentChunkIndex + 1, privacy: .public)/\(totalChunks, privacy: .public))")
+        logger.notice("Appending page \(lastPage + 2, privacy: .public) lazily (chunk \(currentChunkIndex + 1, privacy: .public)/\(totalChunks, privacy: .public))")
         let nextPageStartTime = CFAbsoluteTimeGetCurrent()
         
         // Get next page text

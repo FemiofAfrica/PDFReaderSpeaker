@@ -56,9 +56,9 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
         guard !queue.isEmpty else { return }
         isSpeaking = true
         isPaused = false
-        // Fast startup: only prebuffer first chunk, rest will buffer while playing
-        prebuffer(from: currentIndex, count: AppConfig.initialPrebufferCount)
+        logger.notice("Rendering chunk 0 (start)")
         playWhenReady(index: currentIndex, generationID: generationID)
+        fillRenderPipeline()
     }
 
     /// Append more segments to the queue while playback is active.
@@ -208,9 +208,9 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
             currentTime = 0
             isSpeaking = true
             isPaused = false
-            logger.notice("Playback started (audio playing)")
-            // Prebuffer next segment immediately while playing
-            prebuffer(from: index + 1, count: 1)
+            logger.notice("Playback started: chunk \(index, privacy: .public)")
+            // Fill the render pipeline to keep worker busy
+            fillRenderPipeline()
         } catch {
             NSLog("Kokoro playback failed for segment \(index): \(error.localizedDescription)")
             currentIndex = index + 1
@@ -265,7 +265,7 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
     private func renderSegment(at index: Int, generationID expectedGenerationID: UUID, completion: (() -> Void)? = nil) {
         // Drop stale work immediately
         guard expectedGenerationID == generationID else {
-            logger.log(level: .info, "Stale job dropped before render (generation mismatch)")
+            logger.notice("Stale job dropped before render (generation mismatch)")
             return
         }
         guard index < queue.count else { return }
@@ -344,7 +344,7 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
                 
                 // Re-check generation before recording failure
                 guard expectedGenerationID == self.generationID else {
-                    logger.log(level: .info, "Stale job failed but generation changed, discarding")
+                    logger.notice("Stale job failed but generation changed, discarding")
                     self.stateQueue.sync {
                         self.renderingIndices.remove(index)
                     }

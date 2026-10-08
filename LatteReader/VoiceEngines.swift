@@ -70,7 +70,7 @@ final class KokoroWorker {
         
         // Check generation AFTER acquiring lock to drop stale work
         guard isStillCurrent() else {
-            logger.log(level: .info, "Stale job dropped after lock (segment no longer current)")
+            logger.notice("Stale job dropped after lock (segment no longer current)")
             throw CancellationError()
         }
         
@@ -196,11 +196,11 @@ final class KokoroWorker {
             throw CocoaError(.executableLoad)
         }
         
-        logger.log(level: .info, "Worker started and ready")
+        logger.notice("Worker started and ready")
     }
 
     private func restart(reason: String) {
-        logger.log(level: .info, "Restarting worker: \(reason, privacy: .public)")
+        logger.notice("Restarting worker: \(reason, privacy: .public)")
         try? input?.close()
         if let process, process.isRunning {
             process.terminate()
@@ -221,11 +221,20 @@ final class KokoroWorker {
         output = nil
     }
     
-    func restartAsync() {
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+    /// Terminate the worker process immediately without waiting for the lock.
+    /// The blocked read will fail, then we relaunch under the lock.
+    func terminateWorkerProcess() {
+        // Terminate process directly (non-blocking)
+        if let process = process, process.isRunning {
+            process.terminate()
+            logger.notice("Terminated worker process PID \(process.processIdentifier, privacy: .public)")
+        }
+        
+        // Relaunch in background after brief delay to ensure termination completes
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.1) { [weak self] in
             self?.lock.lock()
             defer { self?.lock.unlock() }
-            self?.restart(reason: "Async restart to kill stale in-flight job")
+            self?.restart(reason: "Relaunch after process termination")
         }
     }
 }
