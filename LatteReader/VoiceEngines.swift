@@ -98,18 +98,19 @@ final class KokoroWorker {
     }
 
     func warmUp() {
-        DispatchQueue.global(qos: .background).async { [weak self] in
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             lock.lock()
             defer { lock.unlock() }
             do {
                 try ensureStarted()
-                // Send a tiny ping render to force model loading.
+                // Send a tiny ping render to force model loading and keep worker warm.
                 guard let input, let output else { return }
+                let outputPath = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("kokoro-warmup-\(UUID().uuidString).wav")
                 let ping: [String: Any] = [
-                    "text": "Hello.",
-                    "output": FileManager.default.temporaryDirectory
-                        .appendingPathComponent("kokoro-warmup-\(UUID().uuidString).wav").path,
+                    "text": "Warming up.",
+                    "output": outputPath.path,
                     "voice": "af_heart",
                     "speed": 1.0,
                     "lang": "en-us",
@@ -117,11 +118,27 @@ final class KokoroWorker {
                 let data = try JSONSerialization.data(withJSONObject: ping)
                 input.write(data)
                 input.write(Data("\n".utf8))
-                _ = output.readLine()
-                try? FileManager.default.removeItem(at: URL(fileURLWithPath: ping["output"] as! String))
+                
+                // Wait for response to ensure model is loaded
+                if let response = output.readLine() {
+                    NSLog("Kokoro worker warmed up: \(response)")
+                }
+                try? FileManager.default.removeItem(at: outputPath)
             } catch {
-                // Warm-up is best-effort; swallow errors silently.
+                NSLog("Kokoro warm-up failed: \(error)")
             }
+        }
+    }
+    
+    /// Keep worker warm by preventing it from shutting down
+    func keepWarm() {
+        // The worker stays persistent as long as the process is running
+        // This just ensures it's started
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            lock.lock()
+            defer { lock.unlock() }
+            _ = try? ensureStarted()
         }
     }
 

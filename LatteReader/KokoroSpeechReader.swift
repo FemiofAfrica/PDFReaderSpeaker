@@ -30,7 +30,6 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
     private let stateQueue = DispatchQueue(label: "LatteReader.KokoroState")
     private let primarySynthesizer: VoiceSynthesizer
     private let fallbackSynthesizer: VoiceSynthesizer
-    private let prebufferCount = 8
 
     var availability: VoiceEngineAvailability { primarySynthesizer.availability }
     var voices: [KokoroVoice] { (primarySynthesizer as? KokoroVoiceEngine)?.availableVoices ?? [] }
@@ -54,7 +53,8 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
         guard !queue.isEmpty else { return }
         isSpeaking = true
         isPaused = false
-        prebuffer(from: currentIndex)
+        // Fast startup: only prebuffer first chunk, rest will buffer while playing
+        prebuffer(from: currentIndex, count: AppConfig.initialPrebufferCount)
         playWhenReady(index: currentIndex, generationID: generationID)
     }
 
@@ -177,7 +177,8 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
             currentTime = 0
             isSpeaking = true
             isPaused = false
-            prebuffer(from: index + 1)
+            // Background prebuffer while playing
+            prebuffer(from: index + 1, count: AppConfig.backgroundPrebufferCount)
         } catch {
             NSLog("Kokoro playback failed for segment \(index): \(error.localizedDescription)")
             currentIndex = index + 1
@@ -212,9 +213,10 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
         return merged
     }
 
-    private func prebuffer(from index: Int) {
+    private func prebuffer(from index: Int, count: Int? = nil) {
         let expectedGenerationID = generationID
-        for nextIndex in index..<(min(index + prebufferCount, queue.count)) {
+        let bufferCount = count ?? AppConfig.backgroundPrebufferCount
+        for nextIndex in index..<(min(index + bufferCount, queue.count)) {
             renderSegment(at: nextIndex, generationID: expectedGenerationID)
         }
     }

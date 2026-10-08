@@ -33,7 +33,11 @@ enum AppConfig {
     
     static let progressTimerInterval: TimeInterval = 0.25
     static let chunkMaxLength = 3_500
-    static let prebufferCount = 8
+    
+    // Streaming playback: start fast, buffer in background
+    static let initialPrebufferCount = 1  // Just first chunk for fast startup
+    static let backgroundPrebufferCount = 6  // Buffer ahead while playing
+    
     static let workerProcessTimeout: TimeInterval = 30.0
     
     // MARK: - Transport

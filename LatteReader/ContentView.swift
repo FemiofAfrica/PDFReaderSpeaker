@@ -51,6 +51,8 @@ struct ContentView: View {
     @State private var isImporterPresented = false
     @State private var keyMonitor: Any?
     @State private var queueStatus: String?
+    @State private var showQueue = false
+    @State private var queuedItems: [(id: UUID, text: String, preview: String)] = []
 
     // Transport / playback state
     @State private var isPlaying = false
@@ -135,6 +137,12 @@ struct ContentView: View {
             // Pre-warm the Kokoro worker so the model is loaded
             // before the user presses Play.
             kokoroReader.warmUp()
+            
+            // Keep worker warm with periodic keep-alive
+            Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { _ in
+                KokoroWorker.shared.keepWarm()
+            }
+            
             // Set up playback controls
             playbackControls.setEngines(kokoro: kokoroReader, piper: piperReader)
             playbackControls.setActiveEngine(selectedVoiceEngine)
@@ -336,12 +344,81 @@ struct ContentView: View {
                         Text(queueStatus)
                             .font(.system(size: 11, weight: .medium))
                         Spacer()
+                        if !queuedItems.isEmpty {
+                            Button {
+                                showQueue.toggle()
+                            } label: {
+                                Image(systemName: showQueue ? "chevron.up" : "list.bullet")
+                                    .font(.system(size: 10, weight: .bold))
+                            }
+                            .buttonStyle(.plain)
+                        }
                     }
                     .foregroundColor(.butter)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
                     .background(Color.caramel.opacity(0.15))
                     .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                }
+                
+                // ── Queue panel ──
+                if showQueue, !queuedItems.isEmpty {
+                    Bezel {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                PanelHeader(label: "Queue (\(queuedItems.count))")
+                                Spacer()
+                                Button {
+                                    clearQueue()
+                                    showQueue = false
+                                } label: {
+                                    Text("Clear All")
+                                        .font(.system(size: 9, weight: .bold))
+                                        .textCase(.uppercase)
+                                        .foregroundColor(.ember)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            
+                            ScrollView {
+                                VStack(spacing: 6) {
+                                    ForEach(Array(queuedItems.enumerated()), id: \.element.id) { index, item in
+                                        HStack(spacing: 8) {
+                                            Text("\(index + 1)")
+                                                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                                .foregroundColor(.textMuted)
+                                                .frame(width: 20)
+                                            
+                                            Text(item.preview)
+                                                .font(.system(size: 10))
+                                                .foregroundColor(.cream.opacity(0.8))
+                                                .lineLimit(2)
+                                            
+                                            Spacer()
+                                            
+                                            Button {
+                                                queuedItems.remove(at: index)
+                                                if queuedItems.isEmpty {
+                                                    showQueue = false
+                                                }
+                                            } label: {
+                                                Image(systemName: "xmark.circle.fill")
+                                                    .font(.system(size: 12))
+                                                    .foregroundColor(.textMuted)
+                                            }
+                                            .buttonStyle(.plain)
+                                        }
+                                        .padding(8)
+                                        .background(Color.black.opacity(0.3))
+                                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                                    }
+                                }
+                            }
+                            .frame(maxHeight: 200)
+                        }
+                        .padding(12)
+                    }
                     .transition(.move(edge: .top).combined(with: .opacity))
                 }
 
@@ -731,17 +808,26 @@ struct ContentView: View {
                 .disabled(!playbackControls.canSkipBackward)
                 .help("⌘← — Previous sentence")
 
-                // Queue selection (test)
-                Button { queueCurrentSelection() } label: {
-                    Text("Q")
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundColor(.espresso)
-                        .frame(width: 22, height: 22)
-                        .background(Color.butter.opacity(0.3))
-                        .clipShape(RoundedRectangle(cornerRadius: 5))
+                // Queue controls
+                Button { 
+                    showQueue.toggle()
+                } label: {
+                    ZStack(alignment: .topTrailing) {
+                        Image(systemName: "list.bullet")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundColor(.espresso)
+                        
+                        if !queuedItems.isEmpty {
+                            Circle()
+                                .fill(Color.ember)
+                                .frame(width: 8, height: 8)
+                                .offset(x: 4, y: -4)
+                        }
+                    }
+                    .frame(width: 22, height: 22)
                 }
-                .buttonStyle(PlainButtonStyle())
-                .help("⌘⌥Q — Queue selection")
+                .buttonStyle(TransportBtnStyle())
+                .help("View Queue (\(queuedItems.count) items)")
 
                 // Play/Pause
                 Button {
@@ -863,12 +949,29 @@ struct ContentView: View {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let text: String
         let hasSelection: Bool
+        let startPage: Int
+        
         if let selection, !selection.isEmpty {
             text = selection
             hasSelection = true
+            startPage = selectedPageID
         } else {
-            text = textToRead(from: pdf)
+            // No selection: read from current page in page-by-page mode, or full doc in continuous mode
+            if selectedReadMode == .pageByPage {
+                // Just current page for fast startup
+                text = pdf.pages.first(where: { $0.id == selectedPageID })?.text ?? ""
+                startPage = selectedPageID
+            } else {
+                // Full document mode - but only if already parsed
+                text = textToRead(from: pdf)
+                startPage = selectedPageID
+            }
             hasSelection = false
+        }
+
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            errorMessage = "No text to read from current selection or page."
+            return
         }
 
         if hasSelection {
@@ -930,6 +1033,12 @@ struct ContentView: View {
             return
         }
         NSLog("⌘⌥Q: selection='\(selection.prefix(80))' (\(selection.count) chars)")
+        
+        // Add to queue UI
+        let id = UUID()
+        let preview = String(selection.prefix(60)) + (selection.count > 60 ? "..." : "")
+        queuedItems.append((id: id, text: selection, preview: preview))
+        
         let count: Int
         switch selectedVoiceEngine {
         case .kokoro:
@@ -939,13 +1048,21 @@ struct ContentView: View {
             piperReader.append(segments: makeSegments(for: selection, kokoroVoiceID: nil))
             count = piperReader.totalChunks
         }
-        analysisMessage = "Queued selection — \(count) total chunk(s)"
-        queueStatus = "✓ Queued — \(count) chunk(s)"
+        
+        // Show queue status
+        queueStatus = "✓ Queued +\(queuedItems.count) — \(count) total chunk(s)"
+        
         // Auto-clear the toast after 4 seconds
         let clearJob = DispatchWorkItem { [self] in
             if queueStatus?.hasPrefix("✓") == true { queueStatus = nil }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 4, execute: clearJob)
+    }
+    
+    private func clearQueue() {
+        queuedItems.removeAll()
+        stopPlayback()
+        queueStatus = nil
     }
 
     /// Build narration segments from raw text.
