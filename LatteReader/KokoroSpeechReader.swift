@@ -112,7 +112,7 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
     func stop() {
         // Bump generation first to invalidate in-flight renders
         generationID = UUID()
-        logger.log(level: .info, "Stop: new generationID to drop stale work")
+        logger.notice("Stop: new generationID to drop stale work")
         
         // If there's a job in flight at the worker, restart worker to kill it immediately
         let hasJobInFlight = stateQueue.sync { jobInFlight }
