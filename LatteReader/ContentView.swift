@@ -1040,8 +1040,12 @@ struct ContentView: View {
     /// Extract text after a selection: remainder of selection's last page + following pages
     private func textAfterSelection(_ selection: PDFSelection, in pdf: LoadedPDF) -> (String, Bool) {
         guard let document = pdfDocument,
-              let lastPage = selection.pages.last,
-              let lastPageIndex = document.index(for: lastPage) else {
+              let lastPage = selection.pages.last else {
+            return ("", false)
+        }
+        
+        let lastPageIndex = document.index(for: lastPage)
+        guard lastPageIndex != NSNotFound else {
             return ("", false)
         }
         
@@ -1092,14 +1096,7 @@ struct ContentView: View {
             case .kokoro:
                 return makeSegments(for: text, kokoroVoiceID: "af_heart")
             case .piper:
-                // For Piper, makeSegments will be called by the engine itself
-                // Return a single segment with the full text
-                return [PlannedSpeechSegment(
-                    text: text,
-                    voiceIdentifier: "af_heart",
-                    sentenceCount: text.components(separatedBy: ".").count,
-                    pageNumber: startPage
-                )]
+                return makeSegments(for: text, kokoroVoiceID: nil)
             }
         }
     }
