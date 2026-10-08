@@ -123,7 +123,7 @@ struct MultiVoiceAnalyzer {
         fallbackPolicy: SpeakerFallbackPolicy
     ) -> [PlannedSpeechSegment] {
         guard let plan else {
-            return Self.chunk(text: text).map {
+            return Self.chunk(text: text, maxLength: AppConfig.chunkMaxLength).map {
                 PlannedSpeechSegment(
                     text: $0,
                     voiceIdentifier: defaultVoiceIdentifier,
@@ -161,7 +161,7 @@ struct MultiVoiceAnalyzer {
                 speakerName = "Narrator"
             }
 
-            return Self.chunk(text: segment.text).map {
+            return Self.chunk(text: segment.text, maxLength: AppConfig.chunkMaxLength).map {
                 PlannedSpeechSegment(text: $0, voiceIdentifier: voiceIdentifier, kokoroVoiceID: profile?.kokoroVoiceID, piperModelPath: profile?.piperModelPath, speakerName: speakerName)
             }
         }

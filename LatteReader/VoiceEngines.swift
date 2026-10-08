@@ -100,7 +100,7 @@ final class KokoroWorker {
             throw CocoaError(.executableLoad)
         }
         
-        logger.log(level: .info, "Audio ready from worker")
+        logger.notice("Audio ready from worker")
     }
 
     private static func prepareTextForSpeech(_ text: String) -> String {
