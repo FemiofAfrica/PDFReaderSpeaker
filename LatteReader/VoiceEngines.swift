@@ -278,7 +278,12 @@ struct PiperVoiceEngine: VoiceSynthesizer {
         return VoiceEngineAvailability(isAvailable: true, message: "Piper fallback ready.")
     }
 
-    func synthesize(segment: PlannedSpeechSegment, outputURL: URL) throws {
+    func synthesize(segment: PlannedSpeechSegment, outputURL: URL, isStillCurrent: () -> Bool) throws {
+        // Check if stale before launching piper
+        guard isStillCurrent() else {
+            throw CancellationError()
+        }
+        
         guard let modelPath = segment.piperModelPath ?? LocalVoiceAssetLocator.onnxFiles(in: LocalVoiceAssetLocator.piperRoots).first?.path else {
             throw CocoaError(.fileNoSuchFile)
         }
