@@ -1,6 +1,8 @@
 import Foundation
 import OSLog
 
+struct CancellationError: Error {}
+
 struct VoiceEngineAvailability: Hashable {
     let isAvailable: Bool
     let message: String
@@ -69,7 +71,7 @@ final class KokoroWorker {
         // Check generation AFTER acquiring lock to drop stale work
         guard isStillCurrent() else {
             logger.log(level: .info, "Stale job dropped after lock (segment no longer current)")
-            return
+            throw CancellationError()
         }
         
         guard let input, let output else { throw CocoaError(.executableLoad) }

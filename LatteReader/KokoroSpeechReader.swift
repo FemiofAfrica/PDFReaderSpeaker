@@ -71,7 +71,10 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
         let startIndex = queue.count
         queue.append(contentsOf: merged)
         if isSpeaking || isPaused {
-            prebuffer(from: startIndex)
+            // Prebuffer appended segments immediately to avoid gaps
+            // Render at least the first segment of the new page
+            let appendedCount = min(merged.count, 2)
+            prebuffer(from: startIndex, count: appendedCount)
         } else {
             // Playback had finished — start playing the newly queued content.
             currentIndex = startIndex
@@ -231,10 +234,10 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
     private func renderSegment(at index: Int, generationID expectedGenerationID: UUID, completion: (() -> Void)? = nil) {
         // Drop stale work immediately
         guard expectedGenerationID == generationID else {
-            NSLog("[LatteTiming] Dropping stale render job for index \(index) (stale generation)")
+            logger.log(level: .info, "Stale job dropped before render (generation mismatch)")
             return
         }
-        guard expectedGenerationID == generationID, index < queue.count else { return }
+        guard index < queue.count else { return }
         var shouldRender = false
         stateQueue.sync {
             if renderedAudio[index] == nil, !renderingIndices.contains(index), !failedIndices.contains(index) {

@@ -1,4 +1,5 @@
 import AppKit
+import OSLog
 import PDFKit
 import PagePromptSupport
 import SwiftUI
@@ -1241,11 +1242,14 @@ struct ContentView: View {
     }
 
     private func pausePlayback() {
-        switch selectedVoiceEngine {
-        case .kokoro: kokoroReader.pauseOrContinue()
-        case .piper: piperReader.pauseOrContinue()
+        let reader = selectedVoiceEngine == .kokoro ? kokoroReader : piperReader
+        reader.pauseOrContinue()
+        isPlaying = !reader.isPaused
+        pausedPageIndex = selectedPageID
+        if !isPlaying {
+            stopContinuationPolling()
         }
-        isPlaying = selectedVoiceEngine == .kokoro ? kokoroReader.isSpeaking : piperReader.isSpeaking
+        speechHighlighter.clearHighlight()
     }
 
     private func stopPlayback() {
