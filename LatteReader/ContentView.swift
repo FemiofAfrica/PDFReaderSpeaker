@@ -366,19 +366,26 @@ struct ContentView: View {
                 if showQueue, !queuedItems.isEmpty {
                     Bezel {
                         VStack(alignment: .leading, spacing: 8) {
-                            HStack {
-                                PanelHeader(label: "Queue (\(queuedItems.count))")
-                                Spacer()
-                                Button {
-                                    clearQueue()
-                                    showQueue = false
-                                } label: {
-                                    Text("Clear All")
-                                        .font(.system(size: 9, weight: .bold))
-                                        .textCase(.uppercase)
-                                        .foregroundColor(.ember)
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack {
+                                    PanelHeader(label: "Queue (\(queuedItems.count))")
+                                    Spacer()
+                                    Button {
+                                        clearQueue()
+                                        showQueue = false
+                                    } label: {
+                                        Text("Clear All")
+                                            .font(.system(size: 9, weight: .bold))
+                                            .textCase(.uppercase)
+                                            .foregroundColor(.ember)
+                                    }
+                                    .buttonStyle(.plain)
                                 }
-                                .buttonStyle(.plain)
+                                Text("Items play next, then reading continues from where each ends.")
+                                    .font(.system(size: 9))
+                                    .foregroundColor(.textMuted)
+                                    .lineLimit(2)
+                                    .fixedSize(horizontal: false, vertical: true)
                             }
                             
                             ScrollView {
@@ -827,7 +834,7 @@ struct ContentView: View {
                     .frame(width: 22, height: 22)
                 }
                 .buttonStyle(TransportBtnStyle())
-                .help("View Queue (\(queuedItems.count) items)")
+                .help("View Queue (\(queuedItems.count) items)\n\nQueued items play next after the current sentence finishes.\nReading then continues from the end of the queued passage.")
 
                 // Play/Pause
                 Button {
@@ -945,25 +952,28 @@ struct ContentView: View {
     }
 
     private func startPlayback(for pdf: LoadedPDF) {
-        let selection = activeProxy.currentSelectionText()?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        
-        if let selection, !selection.isEmpty {
-            // Selection mode: start with selection, then continue from next page
-            startFromSelection(selection, pdf: pdf, currentPage: selectedPageID)
+        if let pdfSelection = activeProxy.currentSelection,
+           let selectionText = pdfSelection.string?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !selectionText.isEmpty {
+            // Selection mode: start with selection, then continue from where it ends
+            startFromSelection(pdfSelection, selectionText: selectionText, pdf: pdf)
         } else {
             // No selection: start from current page and continue forward
             startFromCurrentPage(pdf: pdf, currentPage: selectedPageID)
         }
     }
     
-    private func startFromSelection(_ selection: String, pdf: LoadedPDF, currentPage: Int) {
-        // Play the selection first
-        let selectionSegments = makeSegments(for: selection, kokoroVoiceID: "af_heart")
+    private func startFromSelection(_ pdfSelection: PDFSelection, selectionText: String, pdf: LoadedPDF) {
+        // Find where the selection ends to continue from there
+        let (restOfDocument, shouldContinue) = textAfterSelection(pdfSelection, in: pdf)
         
-        // Then continue with the rest of the document from the next page
-        let restOfDocument = textFromPage(currentPage + 1, through: pdf.pageCount - 1, in: pdf)
-        let continuationSegments = restOfDocument.isEmpty ? [] : makeSegments(for: restOfDocument, kokoroVoiceID: "af_heart")
+        // Build segments for selection using appropriate voice
+        let selectionSegments = buildSegments(for: selectionText, pdf: pdf, startPage: nil)
+        
+        // Build segments for continuation if there's more text
+        let continuationSegments = shouldContinue && !restOfDocument.isEmpty 
+            ? buildSegments(for: restOfDocument, pdf: pdf, startPage: nil)
+            : []
         
         let allSegments = selectionSegments + continuationSegments
         currentChunks = allSegments
@@ -1025,6 +1035,73 @@ struct ContentView: View {
             .filter { pageRange.contains($0.id) }
             .map { $0.text }
             .joined(separator: "\n\n")
+    }
+    
+    /// Extract text after a selection: remainder of selection's last page + following pages
+    private func textAfterSelection(_ selection: PDFSelection, in pdf: LoadedPDF) -> (String, Bool) {
+        guard let document = pdfDocument,
+              let lastPage = selection.pages.last,
+              let lastPageIndex = document.index(for: lastPage) else {
+            return ("", false)
+        }
+        
+        // Get full text of the last page where selection ends
+        guard let pageText = lastPage.string else {
+            // No text on this page, continue from next page
+            return (textFromPage(lastPageIndex + 1, through: pdf.pageCount - 1, in: pdf), true)
+        }
+        
+        // Find where the selection ends on this page
+        // We'll use a heuristic: find the selection text in the page text
+        let selectionText = selection.string ?? ""
+        if let range = pageText.range(of: selectionText, options: [.caseInsensitive, .diacriticInsensitive]) {
+            // Get text after the selection on the same page
+            let afterSelection = String(pageText[range.upperBound...])
+            
+            // Get text from subsequent pages
+            let followingPages = textFromPage(lastPageIndex + 1, through: pdf.pageCount - 1, in: pdf)
+            
+            // Combine: rest of current page + following pages
+            if !afterSelection.isEmpty && !followingPages.isEmpty {
+                return (afterSelection + "\n\n" + followingPages, true)
+            } else if !afterSelection.isEmpty {
+                return (afterSelection, true)
+            } else {
+                return (followingPages, true)
+            }
+        } else {
+            // Couldn't find selection in page text, continue from next page
+            return (textFromPage(lastPageIndex + 1, through: pdf.pageCount - 1, in: pdf), true)
+        }
+    }
+    
+    /// Build segments using the same voice logic as existing playback
+    private func buildSegments(for text: String, pdf: LoadedPDF, startPage: Int?) -> [PlannedSpeechSegment] {
+        if selectedPlaybackMode == .multiVoice {
+            let segments = MultiVoiceAnalyzer().playbackSegments(
+                for: text,
+                pageNumber: startPage,
+                using: voicePlan,
+                defaultVoiceIdentifier: nil,
+                fallbackPolicy: speakerFallbackPolicy
+            )
+            return segments
+        } else {
+            // Single voice mode - use the user's selected voice
+            switch selectedVoiceEngine {
+            case .kokoro:
+                return makeSegments(for: text, kokoroVoiceID: "af_heart")
+            case .piper:
+                // For Piper, makeSegments will be called by the engine itself
+                // Return a single segment with the full text
+                return [PlannedSpeechSegment(
+                    text: text,
+                    voiceIdentifier: "af_heart",
+                    sentenceCount: text.components(separatedBy: ".").count,
+                    pageNumber: startPage
+                )]
+            }
+        }
     }
 
     /// Route playback to the engine the user selected.

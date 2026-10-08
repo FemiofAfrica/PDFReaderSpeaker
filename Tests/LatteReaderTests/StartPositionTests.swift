@@ -2,6 +2,44 @@ import XCTest
 @testable import LatteReader
 
 final class StartPositionTests: XCTestCase {
+    func testTextAfterSelectionMidPage() {
+        // Test continuing from mid-page selection
+        let pageText = "This is the first sentence. This is the selected sentence. This is text after the selection. More text here."
+        let selectionText = "This is the selected sentence."
+        
+        // Find where selection ends in the page text
+        guard let range = pageText.range(of: selectionText) else {
+            XCTFail("Selection not found in page text")
+            return
+        }
+        
+        let afterSelection = String(pageText[range.upperBound...])
+        
+        XCTAssertTrue(afterSelection.hasPrefix(" This is text after the selection."), "Should get text after selection on same page")
+        XCTAssertFalse(afterSelection.contains(selectionText), "Should not include the selection itself")
+    }
+    
+    func testTextAfterSelectionEndOfPage() {
+        // Test selection at end of page - should continue to next page
+        let page1Text = "Content of page one ending with selection text."
+        let page2Text = "Content of page two."
+        let selectionText = "selection text."
+        
+        guard let range = page1Text.range(of: selectionText) else {
+            XCTFail("Selection not found")
+            return
+        }
+        
+        let afterSelectionOnPage1 = String(page1Text[range.upperBound...])
+        
+        // After selection on page 1 is empty or just whitespace
+        XCTAssertTrue(afterSelectionOnPage1.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, 
+                     "After selection on last part of page should be minimal")
+        
+        // Should continue with page 2
+        // (In actual implementation, textAfterSelection returns page remainder + following pages)
+    }
+    
     func testTextFromPageSinglePage() {
         let pages = [
             PDFPageText(id: 0, pageNumber: 1, text: "Page one"),

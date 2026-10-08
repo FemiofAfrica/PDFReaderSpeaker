@@ -110,6 +110,11 @@ final class PDFViewProxy: ObservableObject {
     func currentSelectionText() -> String? {
         pdfView?.currentSelection?.string
     }
+    
+    /// Returns the current PDFSelection object
+    var currentSelection: PDFSelection? {
+        pdfView?.currentSelection
+    }
 }
 
 // MARK: - PDFKit View
