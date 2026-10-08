@@ -87,9 +87,10 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
     }
 
     /// Shared enqueue logic used by both start() and append().
-    private func enqueue(_ segments: [PlannedSpeechSegment]) {
+    private func enqueue(_ segments: [PlannedSpeechSegment], preserveFirstSegment: Bool = false) {
         queue = mergeConsecutiveSameVoice(
-            segments.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            segments.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty },
+            preserveFirstSegment: preserveFirstSegment
         )
         currentIndex = 0
         generationID = UUID()
@@ -219,7 +220,7 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
 
     /// Merge adjacent segments with the same Kokoro voice, up to chunkMaxLength.
     /// This reduces render calls but prevents page-sized chunks that take 45+ seconds.
-    private func mergeConsecutiveSameVoice(_ segments: [PlannedSpeechSegment]) -> [PlannedSpeechSegment] {
+    private func mergeConsecutiveSameVoice(_ segments: [PlannedSpeechSegment], preserveFirstSegment: Bool = false) -> [PlannedSpeechSegment] {
         guard !segments.isEmpty else { return [] }
         var merged: [PlannedSpeechSegment] = []
         var current = segments[0]
@@ -229,8 +230,12 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
             let sep = current.text.last.flatMap { ".!?".contains($0) } == true ? " " : ". "
             let combined = current.text + sep + next.text
             
-            // Only merge if same voice AND within chunkMaxLength
-            if current.kokoroVoiceID == next.kokoroVoiceID && combined.count <= AppConfig.chunkMaxLength {
+            // Don't merge into or out of segment 0 when preserveFirstSegment is true (fast startup)
+            let isFirstSegment = merged.isEmpty
+            let canMergeFirst = !preserveFirstSegment || !isFirstSegment
+            
+            // Only merge if same voice AND within chunkMaxLength AND allowed to merge first
+            if canMergeFirst && current.kokoroVoiceID == next.kokoroVoiceID && combined.count <= AppConfig.chunkMaxLength {
                 current = PlannedSpeechSegment(
                     text: combined,
                     voiceIdentifier: current.voiceIdentifier,
