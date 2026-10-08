@@ -27,7 +27,7 @@ protocol SpeechEngine: AnyObject {
 /// in `KokoroSpeechReader`). Both Kokoro and Piper adapters satisfy this seam.
 protocol VoiceSynthesizer {
     var availability: VoiceEngineAvailability { get }
-    func synthesize(segment: PlannedSpeechSegment, outputURL: URL) throws
+    func synthesize(segment: PlannedSpeechSegment, outputURL: URL, isStillCurrent: () -> Bool) throws
 }
 
 /// Lightweight value type carrying availability info.

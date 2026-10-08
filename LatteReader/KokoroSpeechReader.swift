@@ -276,6 +276,16 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
                     logger.log(level: .info, "Kokoro unavailable, falling back to Piper")
                     try fallbackSynthesizer.synthesize(segment: segment, outputURL: outputURL, isStillCurrent: isStillCurrent)
                 }
+                
+                // Re-check generation AFTER synthesize returns, before touching state
+                guard expectedGenerationID == self.generationID else {
+                    logger.log(level: .info, "Stale job completed but generation changed, discarding result")
+                    self.stateQueue.sync {
+                        self.renderingIndices.remove(index)
+                    }
+                    return
+                }
+                
                 self.stateQueue.sync {
                     self.renderedAudio[index] = outputURL
                     self.renderingIndices.remove(index)
@@ -285,8 +295,23 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
                         DispatchQueue.main.async(execute: cb)
                     }
                 }
+            } catch is CancellationError {
+                // Job was cancelled (stale generation), don't log as failure
+                self.stateQueue.sync {
+                    self.renderingIndices.remove(index)
+                }
             } catch {
                 NSLog("Kokoro/Piper render failed for \(segment.speakerName): \(error.localizedDescription)")
+                
+                // Re-check generation before recording failure
+                guard expectedGenerationID == self.generationID else {
+                    logger.log(level: .info, "Stale job failed but generation changed, discarding")
+                    self.stateQueue.sync {
+                        self.renderingIndices.remove(index)
+                    }
+                    return
+                }
+                
                 self.stateQueue.sync {
                     _ = self.renderingIndices.remove(index)
                     self.failedIndices.insert(index)

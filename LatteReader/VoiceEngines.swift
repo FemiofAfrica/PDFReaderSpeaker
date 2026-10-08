@@ -262,8 +262,8 @@ struct KokoroVoiceEngine: VoiceSynthesizer {
 
     var isAvailable: Bool { availability.isAvailable }
 
-    func synthesize(segment: PlannedSpeechSegment, outputURL: URL) throws {
-        try KokoroWorker.shared.synthesize(segment: segment, outputURL: outputURL)
+    func synthesize(segment: PlannedSpeechSegment, outputURL: URL, isStillCurrent: () -> Bool) throws {
+        try KokoroWorker.shared.synthesize(segment: segment, outputURL: outputURL, isStillCurrent: isStillCurrent)
     }
 }
 
