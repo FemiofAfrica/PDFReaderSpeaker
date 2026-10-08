@@ -69,21 +69,9 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
             newSegments.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         )
         guard !merged.isEmpty else { return }
-        let startIndex = queue.count
         queue.append(contentsOf: merged)
-        if isSpeaking || isPaused {
-            // Prebuffer appended segments immediately to avoid gaps
-            // Render at least the first segment of the new page
-            let appendedCount = min(merged.count, 2)
-            prebuffer(from: startIndex, count: appendedCount)
-        } else {
-            // Playback had finished — start playing the newly queued content.
-            currentIndex = startIndex
-            isSpeaking = true
-            isPaused = false
-            prebuffer(from: startIndex)
-            playWhenReady(index: startIndex, generationID: generationID)
-        }
+        logger.notice("Appended \(merged.count, privacy: .public) segments (total \(queue.count, privacy: .public))")
+        fillRenderPipeline()
     }
 
     /// Shared enqueue logic used by both start() and append().
@@ -114,11 +102,11 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
         generationID = UUID()
         logger.notice("Stop: new generationID to drop stale work")
         
-        // If there's a job in flight at the worker, restart worker to kill it immediately
+        // If there's a job in flight at the worker, terminate process immediately
         let hasJobInFlight = stateQueue.sync { jobInFlight }
         if hasJobInFlight {
-            logger.log(level: .info, "Killed in-flight stale job, restarting worker")
-            KokoroWorker.shared.restartAsync()
+            logger.notice("Killed in-flight stale job, terminating worker")
+            KokoroWorker.shared.terminateWorkerProcess()
             stateQueue.sync { jobInFlight = false }
         }
         
@@ -259,13 +247,32 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
         return merged
     }
 
-    private func prebuffer(from index: Int, count: Int? = nil) {
-        let expectedGenerationID = generationID
-        let bufferCount = count ?? AppConfig.backgroundPrebufferCount
-        // Only prebuffer the next 1-2 segments to avoid stale work
-        let limitedCount = min(bufferCount, 2)
-        for nextIndex in index..<(min(index + limitedCount, queue.count)) {
-            renderSegment(at: nextIndex, generationID: expectedGenerationID)
+    /// Fill the render pipeline to keep the worker busy continuously.
+    /// Renders up to 3 segments ahead of the playhead when the worker is idle.
+    private func fillRenderPipeline() {
+        let (rendered, rendering) = stateQueue.sync {
+            (renderedAudio.keys.sorted(), renderingIndices.sorted())
+        }
+        
+        // Count buffered segments ahead of current position
+        let bufferedAhead = rendered.filter { $0 > currentIndex }.count + 
+                           rendering.filter { $0 > currentIndex }.count
+        
+        // If we have < 3 buffered ahead, find the next segment to render
+        if bufferedAhead < 3 {
+            let allRenderedOrRendering = Set(rendered).union(rendering)
+            
+            // Find first unrendered segment starting from current index
+            for i in currentIndex..<queue.count {
+                if !allRenderedOrRendering.contains(i) {
+                    renderSegment(at: i, generationID: generationID, completion: nil)
+                    // After starting one, check again to fill more if needed
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                        self?.fillRenderPipeline()
+                    }
+                    return
+                }
+            }
         }
     }
 
