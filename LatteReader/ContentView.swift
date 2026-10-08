@@ -811,6 +811,7 @@ struct ContentView: View {
                         .frame(width: 14, height: 14)
                 }
                 .buttonStyle(TransportBtnStyle())
+                .help("Stop")
 
                 // Skip backward (sentence)
                 Button {
