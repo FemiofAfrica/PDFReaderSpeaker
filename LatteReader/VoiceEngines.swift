@@ -87,6 +87,8 @@ final class KokoroWorker {
         logger.log(level: .info, "Job written to worker stdin (\(segment.text.prefix(50), privacy: .public)...)")
         input.write(data)
         input.write(Data("\n".utf8))
+        
+        // Job is now in flight at the worker
 
         guard let line = output.readLine(),
               let responseData = line.data(using: .utf8),

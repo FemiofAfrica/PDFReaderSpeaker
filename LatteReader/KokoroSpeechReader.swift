@@ -27,6 +27,7 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
     private var failedIndices = Set<Int>()
     private var pendingCallbacks: [Int: [() -> Void]] = [:]
     private var generationID = UUID()
+    private var jobInFlight = false
     private let renderQueue = DispatchQueue(label: "LatteReader.KokoroRender", qos: .userInitiated)
     private let stateQueue = DispatchQueue(label: "LatteReader.KokoroState")
     private let primarySynthesizer: VoiceSynthesizer
@@ -109,14 +110,15 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
 
     func stop() {
         // Bump generation first to invalidate in-flight renders
+        let oldGenerationID = generationID
         generationID = UUID()
         logger.log(level: .info, "Stop: new generationID to drop stale work")
         
-        // If there's a job in flight, restart worker to kill it immediately
-        let hasInflightJob = stateQueue.sync { !renderingIndices.isEmpty }
-        if hasInflightJob {
-            logger.log(level: .info, "In-flight job detected, restarting worker to avoid blocking")
-            restartWorkerAsync()
+        // If there's a job in flight at the worker, restart worker to kill it immediately
+        if jobInFlight {
+            logger.log(level: .info, "Killed in-flight stale job, restarting worker")
+            KokoroWorker.shared.restartAsync()
+            jobInFlight = false
         }
         
         player?.stop()
@@ -139,11 +141,6 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
         tempDirectory = nil
     }
     
-    private func restartWorkerAsync() {
-        DispatchQueue.global(qos: .userInitiated).async {
-            KokoroWorker.shared.restartAsync()
-        }
-    }
 
     func refreshProgress() {
         currentTime = player?.currentTime ?? 0
@@ -158,6 +155,14 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
         // Bump generation to drop stale renders from old position
         generationID = UUID()
         logger.log(level: .info, "Skip: new generationID to drop stale work")
+        
+        // If job in flight, restart worker
+        if jobInFlight {
+            logger.log(level: .info, "Killed in-flight stale job, restarting worker")
+            KokoroWorker.shared.restartAsync()
+            jobInFlight = false
+        }
+        
         playWhenReady(index: index, generationID: generationID)
     }
     
@@ -290,12 +295,18 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
                     return expectedGenerationID == self.generationID
                 }
                 
+                // Mark job in flight before calling worker
+                self.jobInFlight = true
+                
                 if primarySynthesizer.availability.isAvailable {
                     try primarySynthesizer.synthesize(segment: segment, outputURL: outputURL, isStillCurrent: isStillCurrent)
                 } else {
                     logger.log(level: .info, "Kokoro unavailable, falling back to Piper")
                     try fallbackSynthesizer.synthesize(segment: segment, outputURL: outputURL, isStillCurrent: isStillCurrent)
                 }
+                
+                // Job returned, clear in-flight flag
+                self.jobInFlight = false
                 
                 // Re-check generation AFTER synthesize returns, before touching state
                 guard expectedGenerationID == self.generationID else {
@@ -317,10 +328,12 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
                 }
             } catch is CancellationError {
                 // Job was cancelled (stale generation), don't log as failure
+                self.jobInFlight = false
                 self.stateQueue.sync {
                     self.renderingIndices.remove(index)
                 }
             } catch {
+                self.jobInFlight = false
                 NSLog("Kokoro/Piper render failed for \(segment.speakerName): \(error.localizedDescription)")
                 
                 // Re-check generation before recording failure
