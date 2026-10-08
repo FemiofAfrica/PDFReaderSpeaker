@@ -870,17 +870,6 @@ struct ContentView: View {
                     }
                 }
                 .buttonStyle(PrimaryTransportBtnStyle())
-
-                // Stop
-                Button {
-                    stopPlayback()
-                } label: {
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(Color(red: 0.78, green: 0.82, blue: 0.76).opacity(0.8))
-                        .frame(width: 16, height: 16)
-                }
-                .buttonStyle(TransportBtnStyle())
-                .help("Stop")
                 
                 // Skip forward (sentence)
                 Button {
