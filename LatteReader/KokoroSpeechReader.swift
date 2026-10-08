@@ -134,6 +134,9 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
         guard index >= 0, index < queue.count else { return }
         player?.stop()
         currentIndex = index
+        // Bump generation to drop stale renders from old position
+        generationID = UUID()
+        NSLog("[LatteTiming] Skip: new generationID to drop stale work")
         playWhenReady(index: index, generationID: generationID)
     }
     
@@ -216,12 +219,19 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
     private func prebuffer(from index: Int, count: Int? = nil) {
         let expectedGenerationID = generationID
         let bufferCount = count ?? AppConfig.backgroundPrebufferCount
-        for nextIndex in index..<(min(index + bufferCount, queue.count)) {
+        // Only prebuffer the next 1-2 segments to avoid stale work
+        let limitedCount = min(bufferCount, 2)
+        for nextIndex in index..<(min(index + limitedCount, queue.count)) {
             renderSegment(at: nextIndex, generationID: expectedGenerationID)
         }
     }
 
     private func renderSegment(at index: Int, generationID expectedGenerationID: UUID, completion: (() -> Void)? = nil) {
+        // Drop stale work immediately
+        guard expectedGenerationID == generationID else {
+            NSLog("[LatteTiming] Dropping stale render job for index \(index) (stale generation)")
+            return
+        }
         guard expectedGenerationID == generationID, index < queue.count else { return }
         var shouldRender = false
         stateQueue.sync {
@@ -245,6 +255,14 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
         let segment = queue[index]
         renderQueue.async { [weak self] in
             guard let self else { return }
+            
+            // Double-check generation before expensive render
+            guard expectedGenerationID == self.generationID else {
+                NSLog("[LatteTiming] Dropping render job at worker call (stale generation)")
+                completion?()
+                return
+            }
+            
             do {
                 let outputURL = try self.makeOutputURL(index: index)
                 if primarySynthesizer.availability.isAvailable {

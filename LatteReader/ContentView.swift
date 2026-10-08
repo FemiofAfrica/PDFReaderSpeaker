@@ -30,6 +30,9 @@ struct ContentView: View {
 
     @State private var selectedVoiceEngine: VoiceEngine = .kokoro
     @State private var currentChunks: [PlannedSpeechSegment] = []
+    @State private var lastPlayedPageIndex: Int?
+    @State private var documentForContinuation: LoadedPDF?
+    @State private var continuationTimer: Timer?
 
     private var activeProxy: PDFViewProxy {
         selectedReadMode == .pageByPage ? pdfProxyPage : pdfProxy
@@ -1009,10 +1012,8 @@ struct ContentView: View {
         
         isPlaying = true
         
-        // Background: append next page after a short delay
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            self?.appendNextPageIfNeeded()
-        }
+        // Background: start polling for page continuation
+        startContinuationPolling()
     }
     
     private func startFromCurrentPage(pdf: LoadedPDF, currentPage: Int) {
@@ -1070,10 +1071,8 @@ struct ContentView: View {
         }
         isPlaying = true
         
-        // Background: append next page after a short delay to allow first chunk to start
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            self?.appendNextPageIfNeeded()
-        }
+        // Background: start polling for page continuation
+        startContinuationPolling()
     }
     
     /// Get text from a range of pages
@@ -1246,6 +1245,78 @@ struct ContentView: View {
         playbackProgress = 0
         speechHighlighter.clearHighlight()
         currentChunks = []
+        stopContinuationPolling()
+    }
+    
+    private func startContinuationPolling() {
+        stopContinuationPolling()
+        continuationTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
+            self.appendNextPageIfNeeded()
+        }
+    }
+    
+    private func stopContinuationPolling() {
+        continuationTimer?.invalidate()
+        continuationTimer = nil
+    }
+    
+    /// Append the next page when playback approaches the end of current segments
+    private func appendNextPageIfNeeded() {
+        guard isPlaying,
+              let pdf = documentForContinuation,
+              let lastPage = lastPlayedPageIndex,
+              lastPage + 1 < pdf.pageCount else {
+            return
+        }
+        
+        // Check if we're near the end of current segments (last 2 chunks)
+        let currentChunkIndex: Int
+        let totalChunks: Int
+        
+        switch selectedVoiceEngine {
+        case .kokoro:
+            currentChunkIndex = kokoroReader.currentChunkIndex
+            totalChunks = kokoroReader.totalChunks
+        case .piper:
+            currentChunkIndex = piperReader.currentChunkIndex
+            totalChunks = piperReader.totalChunks
+        }
+        
+        // If we're within 2 chunks of the end, append next page
+        guard totalChunks - currentChunkIndex <= 2 else {
+            return
+        }
+        
+        NSLog("[LatteTiming] Appending page \(lastPage + 2) lazily (chunk \(currentChunkIndex + 1)/\(totalChunks))")
+        let nextPageStartTime = CFAbsoluteTimeGetCurrent()
+        
+        // Get next page text
+        let nextPageText = textFromPage(lastPage + 1, through: lastPage + 1, in: pdf)
+        guard !nextPageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            // Page is empty, try next one
+            lastPlayedPageIndex = lastPage + 1
+            return
+        }
+        
+        NSLog("[LatteTiming] Next page text extracted (\(nextPageText.count) chars) in \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - nextPageStartTime))s")
+        
+        // Build segments for next page
+        let segments = buildSegments(for: nextPageText, pdf: pdf, startPage: lastPage + 1)
+        
+        NSLog("[LatteTiming] Next page segments built (\(segments.count) segments) in \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - nextPageStartTime))s")
+        
+        // Append to engine
+        switch selectedVoiceEngine {
+        case .kokoro:
+            kokoroReader.append(segments: segments)
+        case .piper:
+            piperReader.append(segments: segments)
+        }
+        
+        NSLog("[LatteTiming] Next page appended in \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - nextPageStartTime))s")
+        
+        // Update last played page
+        lastPlayedPageIndex = lastPage + 1
     }
     
     private func handleWaveformSeek(_ progress: Double) {
