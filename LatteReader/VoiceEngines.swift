@@ -199,9 +199,8 @@ final class KokoroWorker {
         logger.notice("Worker started and ready")
     }
 
-    private var isRestartScheduled = false
-    
     private func restart(reason: String) {
+        // Must be called with lock held
         logger.notice("Restarting worker: \(reason, privacy: .public)")
         isRestartScheduled = false  // Clear flag when actually restarting
         try? input?.close()
