@@ -63,10 +63,16 @@ struct TextRepair {
     private static func fixQuotesAndApostrophes(_ text: String) -> String {
         var result = text
         
-        // Remove whitespace after opening quotes (ASCII " and U+201C ") and before closing quotes (ASCII " and U+201D ")
-        // U+201C is " (left double quotation mark), U+201D is " (right double quotation mark)
-        result = result.replacingOccurrences(of: "[\"\u{201C}]\\s+", with: "\"", options: .regularExpression)
-        result = result.replacingOccurrences(of: "\\s+[\"\u{201D}]", with: "\"", options: .regularExpression)
+        // Fix opening quotes: keep one space after a letter, remove whitespace after the quote
+        // U+201C is " (left double quotation mark)
+        // Handle: understand\n"\namortization → understand "amortization
+        result = result.replacingOccurrences(of: "(\\p{L})\\s*([\"\u{201C}])", with: "$1 $2", options: .regularExpression)
+        result = result.replacingOccurrences(of: "([\"\u{201C}])\\s+", with: "$1", options: .regularExpression)
+        
+        // Fix closing quotes: remove whitespace before the quote, keep one space after when followed by letter
+        // U+201D is " (right double quotation mark)
+        result = result.replacingOccurrences(of: "\\s+([\"\u{201D}])", with: "$1", options: .regularExpression)
+        result = result.replacingOccurrences(of: "([\"\u{201D}])(\\p{L})", with: "$1 $2", options: .regularExpression)
         
         // Fix apostrophes: collapse whitespace (including \n) around ' (ASCII) or ' (U+2019) between letters
         // Handle: it'\ns, you\n're, there\n'\ns, he\n'\ns, you\n'\nve, etc.

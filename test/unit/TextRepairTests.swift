@@ -66,6 +66,8 @@ final class TextRepairTests: XCTestCase {
         XCTAssertEqual(TextRepair.repair("\u{201C}\namortization levels\n\u{201D}"), "\"amortization levels\"")
         XCTAssertEqual(TextRepair.repair("rates.\n\u{201C} That"), "rates. \"That")
         XCTAssertEqual(TextRepair.repair("question,\n\u{201C} he pleads"), "question, \"he pleads")
+        // Keep space before opening quote when it follows a letter
+        XCTAssertEqual(TextRepair.repair("understand\n\u{201C}\namortization"), "understand \"amortization")
     }
     
     // MARK: - Combined Tests

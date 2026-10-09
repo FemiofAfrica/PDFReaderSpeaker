@@ -51,7 +51,9 @@ final class KokoroWorker {
     static let shared = KokoroWorker()
 
     private let lock = NSLock()
+    private let processLock = NSLock()  // Separate lock for process reference only
     private var isRestartScheduled = false
+    private var restartAttempts = 0  // Track restart attempts to prevent infinite recursion
     private var process: Process?
     private var input: FileHandle?
     private var output: FileHandle?
@@ -178,9 +180,15 @@ final class KokoroWorker {
         
         try process.run()
 
+        // Store process reference under both locks
+        processLock.lock()
         self.process = process
+        processLock.unlock()
+        
         input = inputPipe.fileHandleForWriting
         output = outputPipe.fileHandleForReading
+        
+        restartAttempts = 0  // Reset counter on successful start
 
         // Read ready line with timeout
         var readyLine: String?
@@ -204,6 +212,14 @@ final class KokoroWorker {
         // Must be called with lock held
         logger.notice("Restarting worker: \(reason, privacy: .public)")
         isRestartScheduled = false  // Clear flag when actually restarting
+        
+        // Prevent infinite recursion: allow one relaunch attempt, then fail
+        restartAttempts += 1
+        if restartAttempts > 1 {
+            logger.log(level: .error, "Restart attempt limit reached, giving up")
+            return
+        }
+        
         try? input?.close()
         if let process, process.isRunning {
             process.terminate()
@@ -219,25 +235,35 @@ final class KokoroWorker {
                 process.interrupt()
             }
         }
+        
+        processLock.lock()
         process = nil
+        processLock.unlock()
+        
         input = nil
         output = nil
-        try? start()
+        try? ensureStarted()
     }
     
-    /// Terminate the worker process immediately without waiting for the lock.
-    /// The blocked read will fail, then we relaunch under the lock (once).
+    /// Terminate the worker process immediately without waiting for the main lock.
+    /// The blocked read will get EOF and throw, then we relaunch under the lock (once).
     func terminateWorkerProcess() {
+        // Get process reference under its own small lock, NOT the main lock
+        // (main lock is held by synthesize() blocked on read)
+        processLock.lock()
+        let processToTerminate = self.process
+        processLock.unlock()
+        
+        // Terminate WITHOUT holding the main lock
+        if let process = processToTerminate, process.isRunning {
+            process.terminate()
+            self.logger.notice("Terminated worker process PID \(process.processIdentifier, privacy: .public) (no main lock)")
+        }
+        
+        // Now schedule restart under main lock
         lock.lock()
         defer { lock.unlock() }
         
-        // Terminate process directly
-        if let process = self.process, process.isRunning {
-            process.terminate()
-            self.logger.notice("Terminated worker process PID \(process.processIdentifier, privacy: .public)")
-        }
-        
-        // Schedule restart only if not already scheduled
         guard !isRestartScheduled else { return }
         isRestartScheduled = true
         
