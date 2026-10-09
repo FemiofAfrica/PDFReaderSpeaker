@@ -3,82 +3,79 @@ import XCTest
 
 final class TextRepairTests: XCTestCase {
     
-    // MARK: - Ligature Tests
+    // MARK: - Ligature Tests (U+0000 = \u{0})
     
     func testLigatureFi() {
-        // Missing 'fi' ligatures
-        XCTAssertTrue(TextRepair.repair("police o cers").contains("officers"))
-        XCTAssertTrue(TextRepair.repair("they  nd on the ground").contains("find"))
-        XCTAssertTrue(TextRepair.repair("tropical  sh").contains("fish"))
-        XCTAssertTrue(TextRepair.repair("to  gure out how we can a ord").contains("figure"))
-        XCTAssertTrue(TextRepair.repair("in ation rates").contains("inflation"))
-        XCTAssertTrue(TextRepair.repair("the  rst door").contains("first"))
-        XCTAssertTrue(TextRepair.repair(" tness").contains("fitness"))
-        XCTAssertTrue(TextRepair.repair("classi ed").contains("classified"))
-        XCTAssertTrue(TextRepair.repair("her  ngers").contains("fingers"))
-        XCTAssertTrue(TextRepair.repair("past  fteen").contains("fifteen"))
+        // Real samples with U+0000 (NUL character)
+        XCTAssertEqual(TextRepair.repair("police o\u{0}cers"), "police officers")
+        XCTAssertEqual(TextRepair.repair("they \u{0}nd on the ground"), "they find on the ground")
+        XCTAssertEqual(TextRepair.repair("tropical \u{0}sh"), "tropical fish")
+        XCTAssertEqual(TextRepair.repair("to \u{0}gure out"), "to figure out")
+        XCTAssertEqual(TextRepair.repair("in\u{0}ation rates"), "inflation rates")
+        XCTAssertEqual(TextRepair.repair("the \u{0}rst door"), "the first door")
+        XCTAssertEqual(TextRepair.repair("\u{0}tness"), "fitness")
+        XCTAssertEqual(TextRepair.repair("classi\u{0}ed"), "classified")
+        XCTAssertEqual(TextRepair.repair("her \u{0}ngers"), "her fingers")
+        XCTAssertEqual(TextRepair.repair("past \u{0}fteen"), "past fifteen")
     }
     
     func testLigatureFf() {
         // Missing 'ff' ligatures
-        XCTAssertTrue(TextRepair.repair("to o er").contains("offer"))
-        XCTAssertTrue(TextRepair.repair("drift o  and").contains("off"))
-        XCTAssertTrue(TextRepair.repair("idiotically di cult").contains("difficult"))
-        XCTAssertTrue(TextRepair.repair("to  gure out how we can a ord").contains("afford"))
+        XCTAssertEqual(TextRepair.repair("to o\u{0}er"), "to offer")
+        XCTAssertEqual(TextRepair.repair("drift o\u{0} and"), "drift off and")
+        XCTAssertEqual(TextRepair.repair("idiotically di\u{0}cult"), "idiotically difficult")
+        XCTAssertEqual(TextRepair.repair("we can a\u{0}ord"), "we can afford")
     }
     
     func testLigatureFl() {
         // Missing 'fl' ligatures
-        XCTAssertTrue(TextRepair.repair("bank robber  ed").contains("fled"))
-        XCTAssertTrue(TextRepair.repair("the top  oor").contains("floor"))
+        XCTAssertEqual(TextRepair.repair("bank robber \u{0}ed"), "bank robber fled")
+        XCTAssertEqual(TextRepair.repair("the top \u{0}oor"), "the top floor")
     }
     
     func testLigatureFfi() {
         // Missing 'ffi' ligatures
-        XCTAssertTrue(TextRepair.repair("tra c").contains("traffic") || TextRepair.repair("tra c").contains("trafic"))
-        XCTAssertTrue(TextRepair.repair("o cial").contains("official"))
+        XCTAssertTrue(TextRepair.repair("tra\u{0}c").contains("traffic"))
+        XCTAssertTrue(TextRepair.repair("o\u{0}cial").contains("official"))
     }
     
     func testLigatureFfl() {
         // Missing 'ffl' ligatures
-        XCTAssertTrue(TextRepair.repair("ba ed").contains("baffled") || TextRepair.repair("ba ed").contains("bafled"))
-        XCTAssertTrue(TextRepair.repair("sca old").contains("scaffold"))
+        XCTAssertTrue(TextRepair.repair("ba\u{0}ed").contains("baffled"))
+        XCTAssertTrue(TextRepair.repair("sca\u{0}old").contains("scaffold"))
     }
     
-    // MARK: - Apostrophe Tests
+    // MARK: - Apostrophe Tests (U+2019 = ' and \n)
     
-    func testApostrophes() {
-        XCTAssertEqual(TextRepair.repair("it' s"), "it's")
-        XCTAssertEqual(TextRepair.repair("you 're"), "you're")
-        XCTAssertEqual(TextRepair.repair("there ' s"), "there's")
-        XCTAssertEqual(TextRepair.repair("we 're"), "we're")
-        XCTAssertEqual(TextRepair.repair("he ' s"), "he's")
-        XCTAssertEqual(TextRepair.repair("don 't"), "don't")
-        XCTAssertEqual(TextRepair.repair("I 'm"), "I'm")
-        XCTAssertEqual(TextRepair.repair("they 'll"), "they'll")
-        XCTAssertEqual(TextRepair.repair("we 've"), "we've")
-        XCTAssertEqual(TextRepair.repair("he 'd"), "he'd")
+    func testApostrophesWithNewlines() {
+        // Real samples with U+2019 (') and newlines
+        XCTAssertEqual(TextRepair.repair("it'\ns always"), "it's always")
+        XCTAssertEqual(TextRepair.repair("you\n're trying"), "you're trying")
+        XCTAssertEqual(TextRepair.repair("there\n'\ns such"), "there's such")
+        XCTAssertEqual(TextRepair.repair("New Year'\ns Eve"), "New Year's Eve")
+        XCTAssertEqual(TextRepair.repair("he\n'\ns sighing"), "he's sighing")
+        XCTAssertEqual(TextRepair.repair("you\n'\nve reached"), "you've reached")
     }
     
     // MARK: - Quote Tests
     
-    func testQuotes() {
-        XCTAssertEqual(TextRepair.repair("\" amortization levels \""), "\"amortization levels\"")
-        XCTAssertEqual(TextRepair.repair("rates. \" That"), "rates. \"That")
-        XCTAssertTrue(TextRepair.repair("he said \" hello \"").contains("\"hello\""))
+    func testQuotesWithNewlines() {
+        // Real samples with newlines around quotes
+        XCTAssertEqual(TextRepair.repair("\"\namortization levels\n\""), "\"amortization levels\"")
+        XCTAssertEqual(TextRepair.repair("rates.\n\" That"), "rates. \"That")
+        XCTAssertEqual(TextRepair.repair("question,\n\" he pleads"), "question, \"he pleads")
     }
     
     // MARK: - Combined Tests
     
     func testCombinedIssues() {
-        // Test sentence with both ligature and apostrophe issues
-        let input = "The police o cers couldn 't  nd the  rst clue on the top  oor."
+        // Test with both U+0000 ligatures and U+2019 apostrophes with newlines
+        let input = "The police o\u{0}cers couldn\n't \u{0}nd the \u{0}rst clue."
         let output = TextRepair.repair(input)
         XCTAssertTrue(output.contains("officers"))
         XCTAssertTrue(output.contains("couldn't"))
         XCTAssertTrue(output.contains("find"))
         XCTAssertTrue(output.contains("first"))
-        XCTAssertTrue(output.contains("floor"))
     }
     
     func testPreservesCorrectText() {

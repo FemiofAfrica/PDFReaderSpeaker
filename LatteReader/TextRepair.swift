@@ -1,6 +1,6 @@
 import Foundation
 
-/// Repairs common PDF text extraction issues: missing ligatures and broken apostrophes/quotes.
+/// Repairs common PDF text extraction issues: missing ligatures (U+0000) and broken apostrophes/quotes.
 struct TextRepair {
     private static var dictionaryWords: Set<String>?
     private static var repairCache: [String: String] = [:]
@@ -21,126 +21,132 @@ struct TextRepair {
         return words
     }
     
-    /// Check if a word is in the dictionary
+    /// Check if a word is in the dictionary (case-insensitive, ignoring trailing punctuation)
     private static func isWord(_ candidate: String) -> Bool {
         let dictionary = loadDictionary()
-        return dictionary.contains(candidate.lowercased())
+        let cleaned = candidate.lowercased().trimmingCharacters(in: CharacterSet.letters.inverted)
+        return dictionary.contains(cleaned)
     }
     
     /// Repair common PDF extraction issues
     static func repair(_ text: String) -> String {
         var result = text
         
-        // 1. Fix apostrophes and quotes
+        // 1. Fix apostrophes and quotes (handles U+2019 and \n)
         result = fixQuotesAndApostrophes(result)
         
-        // 2. Fix missing ligatures
+        // 2. Fix missing ligatures (U+0000 → fi/ff/fl/ffi/ffl)
         result = fixLigatures(result)
         
         return result
     }
     
-    /// Remove whitespace around apostrophes and quotes
+    /// Remove whitespace around apostrophes (U+2019 ') and quotes, including newlines
     private static func fixQuotesAndApostrophes(_ text: String) -> String {
         var result = text
         
-        // Remove whitespace before closing " and after opening "
-        result = result.replacingOccurrences(of: #"\s+""#, with: "\"", options: .regularExpression)
+        // Remove whitespace (including \n) after opening " and before closing "
         result = result.replacingOccurrences(of: #""\s+"#, with: "\"", options: .regularExpression)
+        result = result.replacingOccurrences(of: #"\s+""#, with: "\"", options: .regularExpression)
         
-        // Fix apostrophes: remove space/newline around ' and ' when between letters or before common contractions
-        // Patterns: it' s, you 're, there ' s, we 're, he ' s, etc.
-        let apostrophePatterns = [
-            (#"(\w)\s+['\']\s*s\b"#, "$1's"),           // it' s → it's
-            (#"(\w)\s+['\']\s*re\b"#, "$1're"),         // you 're → you're
-            (#"(\w)\s+['\']\s*ve\b"#, "$1've"),         // we 've → we've
-            (#"(\w)\s+['\']\s*ll\b"#, "$1'll"),         // they 'll → they'll
-            (#"(\w)\s+['\']\s*d\b"#, "$1'd"),           // he 'd → he'd
-            (#"(\w)\s+['\']\s*t\b"#, "$1't"),           // don 't → don't
-            (#"(\w)\s+['\']\s*m\b"#, "$1'm"),           // I 'm → I'm
-            (#"(\w)['\']\s+(\w)"#, "$1'$2"),            // word' s → word's
-            (#"(\w)\s+['\']\s+(\w)"#, "$1'$2")          // word ' s → word's
-        ]
+        // Fix apostrophes: collapse whitespace (including \n) around ' or ' between letters
+        // Handle: it'\ns, you\n're, there\n'\ns, he\n'\ns, you\n'\nve, etc.
+        // U+2019 is ' (right single quotation mark)
+        let apostrophePattern = #"(\p{L})\s*['\u{2019}]\s*(\p{L})"#
+        result = result.replacingOccurrences(of: apostrophePattern, with: "$1'$2", options: .regularExpression)
         
-        for (pattern, replacement) in apostrophePatterns {
-            result = result.replacingOccurrences(of: pattern, with: replacement, options: .regularExpression)
+        return result
+    }
+    
+    /// Fix missing ligatures: U+0000 (NUL) → fi, ff, fl, ffi, ffl
+    private static func fixLigatures(_ text: String) -> String {
+        let ligatures = ["fi", "ff", "fl", "ffi", "ffl"]
+        
+        // Find all words (maximal runs of letters plus U+0000)
+        var result = ""
+        var currentWord = ""
+        
+        for char in text {
+            if char.isLetter || char == "\u{0}" {
+                currentWord.append(char)
+            } else {
+                // End of word
+                if currentWord.contains("\u{0}") {
+                    // Check cache first
+                    let cached = cacheQueue.sync { repairCache[currentWord] }
+                    if let cached = cached {
+                        result.append(cached)
+                    } else {
+                        let repaired = repairWord(currentWord, ligatures: ligatures)
+                        cacheQueue.sync { repairCache[currentWord] = repaired }
+                        result.append(repaired)
+                    }
+                } else {
+                    result.append(currentWord)
+                }
+                result.append(char)
+                currentWord = ""
+            }
+        }
+        
+        // Handle last word
+        if !currentWord.isEmpty {
+            if currentWord.contains("\u{0}") {
+                let cached = cacheQueue.sync { repairCache[currentWord] }
+                if let cached = cached {
+                    result.append(cached)
+                } else {
+                    let repaired = repairWord(currentWord, ligatures: ligatures)
+                    cacheQueue.sync { repairCache[currentWord] = repaired }
+                    result.append(repaired)
+                }
+            } else {
+                result.append(currentWord)
+            }
         }
         
         return result
     }
     
-    /// Fix missing ligatures (fi, ff, fl, ffi, ffl)
-    private static func fixLigatures(_ text: String) -> String {
-        let ligatures = ["fi", "ff", "fl", "ffi", "ffl"]
-        var tokens = text.components(separatedBy: .whitespacesAndNewlines)
+    /// Repair a single word containing U+0000 by trying ligature replacements
+    private static func repairWord(_ word: String, ligatures: [String]) -> String {
+        // Find all positions of U+0000
+        let nulPositions = word.enumerated().compactMap { $0.element == "\u{0}" ? $0.offset : nil }
         
-        for i in 0..<tokens.count {
-            let token = tokens[i]
-            guard !token.isEmpty else { continue }
-            
-            // Only process tokens with suspicious gaps (double space placeholder or non-word)
-            let hasDoubleSpace = token.contains("  ")
-            let isNonWord = !isWord(token.replacingOccurrences(of: #"[^\w]"#, with: "", options: .regularExpression))
-            
-            guard hasDoubleSpace || isNonWord else { continue }
-            
-            // Check cache first
-            if let cached = cacheQueue.sync(execute: { repairCache[token] }) {
-                tokens[i] = cached
-                continue
+        guard !nulPositions.isEmpty else { return word }
+        
+        // Generate all combinations of ligature replacements (cartesian product)
+        func generateCandidates(_ positions: [Int], _ ligatures: [String], _ baseWord: String) -> [String] {
+            guard let firstPos = positions.first else {
+                return [baseWord]
             }
             
-            var repaired = token
+            var candidates: [String] = []
+            let remainingPositions = Array(positions.dropFirst())
             
-            // Try inserting ligatures at gaps
-            // Gaps: runs of 1-2 spaces, or between letters where a ligature would make sense
-            let gapPattern = #"(\w?)(\s{1,2}|\b)(\w?)"#
-            if let regex = try? NSRegularExpression(pattern: gapPattern, options: []) {
-                let nsString = token as NSString
-                let matches = regex.matches(in: token, options: [], range: NSRange(location: 0, length: nsString.length))
+            for ligature in ligatures {
+                var modified = baseWord
+                let index = modified.index(modified.startIndex, offsetBy: firstPos)
+                modified.replaceSubrange(index...index, with: ligature)
                 
-                for match in matches.reversed() {
-                    let fullRange = match.range
-                    let before = match.range(at: 1)
-                    let gap = match.range(at: 2)
-                    let after = match.range(at: 3)
-                    
-                    guard gap.length > 0 else { continue }
-                    
-                    let beforeChar = before.length > 0 ? nsString.substring(with: before) : ""
-                    let afterChar = after.length > 0 ? nsString.substring(with: after) : ""
-                    
-                    // Try each ligature
-                    for ligature in ligatures {
-                        let candidates = [
-                            beforeChar + ligature + afterChar,  // with space removed
-                            beforeChar + ligature + " " + afterChar  // keeping space
-                        ]
-                        
-                        for candidate in candidates {
-                            let testToken = nsString.replacingCharacters(in: fullRange, with: candidate)
-                            let cleanTest = testToken.replacingOccurrences(of: #"[^\w]"#, with: "", options: .regularExpression)
-                            
-                            if isWord(cleanTest) && !isWord(token.replacingOccurrences(of: #"[^\w]"#, with: "", options: .regularExpression)) {
-                                repaired = testToken
-                                break
-                            }
-                        }
-                        
-                        if repaired != token {
-                            break
-                        }
-                    }
-                }
+                // Recursively replace remaining NULs
+                let subCandidates = generateCandidates(remainingPositions.map { $0 + ligature.count - 1 }, ligatures, modified)
+                candidates.append(contentsOf: subCandidates)
             }
             
-            // Cache result
-            cacheQueue.sync {
-                repairCache[token] = repaired
-            }
-            tokens[i] = repaired
+            return candidates
         }
         
-        return tokens.joined(separator: " ")
+        let candidates = generateCandidates(nulPositions, ligatures, word)
+        
+        // Pick first candidate that's a dictionary word
+        for candidate in candidates {
+            if isWord(candidate) {
+                return candidate
+            }
+        }
+        
+        // Fall back: replace all U+0000 with "fi"
+        return word.replacingOccurrences(of: "\u{0}", with: "fi")
     }
 }
