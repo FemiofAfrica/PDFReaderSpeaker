@@ -72,10 +72,12 @@ final class PDFKitTextParser: PDFTextParsing {
 
         let pages = (0..<document.pageCount).map { index in
             let page = document.page(at: index)
+            let rawText = page?.string ?? ""
+            let repairedText = TextRepair.repair(rawText)
             return PDFPageText(
                 id: index,
                 pageNumber: index + 1,
-                text: page?.string?.normalisedForSpeech() ?? ""
+                text: repairedText.normalisedForSpeech()
             )
         }
 
