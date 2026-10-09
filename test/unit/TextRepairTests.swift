@@ -49,21 +49,23 @@ final class TextRepairTests: XCTestCase {
     
     func testApostrophesWithNewlines() {
         // Real samples with U+2019 (') and newlines
-        XCTAssertEqual(TextRepair.repair("it'\ns always"), "it's always")
-        XCTAssertEqual(TextRepair.repair("you\n're trying"), "you're trying")
-        XCTAssertEqual(TextRepair.repair("there\n'\ns such"), "there's such")
-        XCTAssertEqual(TextRepair.repair("New Year'\ns Eve"), "New Year's Eve")
-        XCTAssertEqual(TextRepair.repair("he\n'\ns sighing"), "he's sighing")
-        XCTAssertEqual(TextRepair.repair("you\n'\nve reached"), "you've reached")
+        // Use \u{2019} in normal string (not raw string) so it becomes the actual character
+        XCTAssertEqual(TextRepair.repair("it\u{2019}\ns always"), "it's always")
+        XCTAssertEqual(TextRepair.repair("you\n\u{2019}re trying"), "you're trying")
+        XCTAssertEqual(TextRepair.repair("there\n\u{2019}\ns such"), "there's such")
+        XCTAssertEqual(TextRepair.repair("New Year\u{2019}\ns Eve"), "New Year's Eve")
+        XCTAssertEqual(TextRepair.repair("he\n\u{2019}\ns sighing"), "he's sighing")
+        XCTAssertEqual(TextRepair.repair("you\n\u{2019}\nve reached"), "you've reached")
     }
     
     // MARK: - Quote Tests
     
     func testQuotesWithNewlines() {
-        // Real samples with newlines around quotes
-        XCTAssertEqual(TextRepair.repair("\"\namortization levels\n\""), "\"amortization levels\"")
-        XCTAssertEqual(TextRepair.repair("rates.\n\" That"), "rates. \"That")
-        XCTAssertEqual(TextRepair.repair("question,\n\" he pleads"), "question, \"he pleads")
+        // Real samples with U+201C (") and U+201D (") curly quotes
+        // Use \u{201C} and \u{201D} in normal string so they become actual characters
+        XCTAssertEqual(TextRepair.repair("\u{201C}\namortization levels\n\u{201D}"), "\"amortization levels\"")
+        XCTAssertEqual(TextRepair.repair("rates.\n\u{201C} That"), "rates. \"That")
+        XCTAssertEqual(TextRepair.repair("question,\n\u{201C} he pleads"), "question, \"he pleads")
     }
     
     // MARK: - Combined Tests
