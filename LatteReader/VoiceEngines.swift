@@ -199,8 +199,11 @@ final class KokoroWorker {
         logger.notice("Worker started and ready")
     }
 
+    private var isRestartScheduled = false
+    
     private func restart(reason: String) {
         logger.notice("Restarting worker: \(reason, privacy: .public)")
+        isRestartScheduled = false  // Clear flag when actually restarting
         try? input?.close()
         if let process, process.isRunning {
             process.terminate()
@@ -219,6 +222,7 @@ final class KokoroWorker {
         process = nil
         input = nil
         output = nil
+        try? start()
     }
     
     /// Terminate the worker process immediately without waiting for the lock.
