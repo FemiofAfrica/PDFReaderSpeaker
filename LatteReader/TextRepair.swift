@@ -22,10 +22,28 @@ struct TextRepair {
     }
     
     /// Check if a word is in the dictionary (case-insensitive, ignoring trailing punctuation)
+    /// Also accepts if stripping common suffixes gives a dictionary word
     private static func isWord(_ candidate: String) -> Bool {
         let dictionary = loadDictionary()
         let cleaned = candidate.lowercased().trimmingCharacters(in: CharacterSet.letters.inverted)
-        return dictionary.contains(cleaned)
+        
+        // Check exact match first
+        if dictionary.contains(cleaned) {
+            return true
+        }
+        
+        // Try stripping common suffixes
+        let suffixes = ["ers", "ing", "ed", "es", "ly", "er", "s", "d"]
+        for suffix in suffixes {
+            if cleaned.hasSuffix(suffix) {
+                let stem = String(cleaned.dropLast(suffix.count))
+                if !stem.isEmpty && dictionary.contains(stem) {
+                    return true
+                }
+            }
+        }
+        
+        return false
     }
     
     /// Repair common PDF extraction issues
@@ -41,18 +59,19 @@ struct TextRepair {
         return result
     }
     
-    /// Remove whitespace around apostrophes (U+2019 ') and quotes, including newlines
+    /// Remove whitespace around apostrophes (U+2019 ') and quotes (U+201C/U+201D), including newlines
     private static func fixQuotesAndApostrophes(_ text: String) -> String {
         var result = text
         
-        // Remove whitespace (including \n) after opening " and before closing "
-        result = result.replacingOccurrences(of: #""\s+"#, with: "\"", options: .regularExpression)
-        result = result.replacingOccurrences(of: #"\s+""#, with: "\"", options: .regularExpression)
+        // Remove whitespace after opening quotes (ASCII " and U+201C ") and before closing quotes (ASCII " and U+201D ")
+        // U+201C is " (left double quotation mark), U+201D is " (right double quotation mark)
+        result = result.replacingOccurrences(of: "[\"\u{201C}]\\s+", with: "\"", options: .regularExpression)
+        result = result.replacingOccurrences(of: "\\s+[\"\u{201D}]", with: "\"", options: .regularExpression)
         
-        // Fix apostrophes: collapse whitespace (including \n) around ' or ' between letters
+        // Fix apostrophes: collapse whitespace (including \n) around ' (ASCII) or ' (U+2019) between letters
         // Handle: it'\ns, you\n're, there\n'\ns, he\n'\ns, you\n'\nve, etc.
         // U+2019 is ' (right single quotation mark)
-        let apostrophePattern = #"(\p{L})\s*['\u{2019}]\s*(\p{L})"#
+        let apostrophePattern = "(\\p{L})\\s*['\u{2019}]\\s*(\\p{L})"
         result = result.replacingOccurrences(of: apostrophePattern, with: "$1'$2", options: .regularExpression)
         
         return result
@@ -109,11 +128,26 @@ struct TextRepair {
     }
     
     /// Repair a single word containing U+0000 by trying ligature replacements
+    /// Prefers ffi/ffl over fi/fl when context suggests it
     private static func repairWord(_ word: String, ligatures: [String]) -> String {
         // Find all positions of U+0000
         let nulPositions = word.enumerated().compactMap { $0.element == "\u{0}" ? $0.offset : nil }
         
         guard !nulPositions.isEmpty else { return word }
+        
+        // Reorder ligatures to prefer longer ones when context suggests it
+        // For "o\u{0}cers", prefer ffi before fi (gives "officers" vs "oficers")
+        var orderedLigatures = ligatures
+        if nulPositions.count == 1 {
+            let pos = nulPositions[0]
+            let before = pos > 0 ? String(word[word.index(word.startIndex, offsetBy: pos - 1)]) : ""
+            let after = pos < word.count - 1 ? String(word[word.index(word.startIndex, offsetBy: pos + 1)]) : ""
+            
+            // If surrounded by letters that could be part of ffi/ffl, try those first
+            if before == "f" || before == "o" {
+                orderedLigatures = ["ffi", "ffl", "fi", "ff", "fl"]
+            }
+        }
         
         // Generate all combinations of ligature replacements (cartesian product)
         func generateCandidates(_ positions: [Int], _ ligatures: [String], _ baseWord: String) -> [String] {
@@ -137,9 +171,9 @@ struct TextRepair {
             return candidates
         }
         
-        let candidates = generateCandidates(nulPositions, ligatures, word)
+        let candidates = generateCandidates(nulPositions, orderedLigatures, word)
         
-        // Pick first candidate that's a dictionary word
+        // Pick first candidate that's a dictionary word (with suffix stripping)
         for candidate in candidates {
             if isWord(candidate) {
                 return candidate
