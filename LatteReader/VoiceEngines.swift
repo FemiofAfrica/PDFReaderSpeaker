@@ -51,6 +51,7 @@ final class KokoroWorker {
     static let shared = KokoroWorker()
 
     private let lock = NSLock()
+    private var isRestartScheduled = false
     private var process: Process?
     private var input: FileHandle?
     private var output: FileHandle?
