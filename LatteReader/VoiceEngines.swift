@@ -222,20 +222,31 @@ final class KokoroWorker {
     }
     
     /// Terminate the worker process immediately without waiting for the lock.
-    /// The blocked read will fail, then we relaunch under the lock.
+    /// The blocked read will fail, then we relaunch under the lock (once).
     func terminateWorkerProcess() {
-        // Terminate process directly (non-blocking)
+        lock.lock()
+        defer { lock.unlock() }
+        
+        // Terminate process directly
         if let process = self.process, process.isRunning {
             process.terminate()
             self.logger.notice("Terminated worker process PID \(process.processIdentifier, privacy: .public)")
         }
+        
+        // Schedule restart only if not already scheduled
+        guard !isRestartScheduled else { return }
+        isRestartScheduled = true
         
         // Relaunch in background after brief delay to ensure termination completes
         DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.1) { [weak self] in
             guard let self = self else { return }
             self.lock.lock()
             defer { self.lock.unlock() }
-            self.restart(reason: "Relaunch after process termination")
+            
+            // Only restart if still scheduled (not already restarted by error handler)
+            if self.isRestartScheduled {
+                self.restart(reason: "Relaunch after process termination")
+            }
         }
     }
 }

@@ -133,7 +133,9 @@ final class LiteparseCLITextParser: PDFTextParsing {
 
         let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
         let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-        let output = String(data: outputData, encoding: .utf8)?.normalisedForSpeech() ?? ""
+        let rawOutput = String(data: outputData, encoding: .utf8) ?? ""
+        let repairedOutput = TextRepair.repair(rawOutput)
+        let output = repairedOutput.normalisedForSpeech()
         let errorOutput = String(data: errorData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
         guard process.terminationStatus == 0 else {

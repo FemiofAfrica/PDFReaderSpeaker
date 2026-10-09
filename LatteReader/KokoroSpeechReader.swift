@@ -254,24 +254,38 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
             (self.renderedAudio.keys.sorted(), self.renderingIndices.sorted())
         }
         
-        // Count buffered segments ahead of current position
-        let bufferedAhead = rendered.filter { $0 > self.currentIndex }.count + 
-                           rendering.filter { $0 > self.currentIndex }.count
+        // Count RENDERED (not in-flight) segments ahead of current position
+        let renderedAhead = rendered.filter { $0 > self.currentIndex }.count
         
-        // If we have < 3 buffered ahead, find the next segment to render
-        if bufferedAhead < 3 {
+        // Keep rendering until we have 3 rendered segments ahead
+        // Don't count in-flight work as "buffered" since it's not ready to play
+        while renderedAhead < 3 {
             let allRenderedOrRendering = Set(rendered).union(rendering)
             
             // Find first unrendered segment starting from current index
+            var foundSegment = false
             for i in self.currentIndex..<self.queue.count {
                 if !allRenderedOrRendering.contains(i) {
                     self.renderSegment(at: i, generationID: self.generationID, completion: nil)
-                    // After starting one, check again to fill more if needed
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                        self?.fillRenderPipeline()
-                    }
-                    return
+                    foundSegment = true
+                    break
                 }
+            }
+            
+            // If no more segments to render, we're done
+            if !foundSegment {
+                break
+            }
+            
+            // Re-check rendered count after starting a new render
+            let newRendered = stateQueue.sync { self.renderedAudio.keys.sorted() }
+            let newRenderedAhead = newRendered.filter { $0 > self.currentIndex }.count
+            
+            // If count didn't increase, we started an in-flight job, keep going
+            if newRenderedAhead <= renderedAhead {
+                continue
+            } else {
+                break
             }
         }
     }
