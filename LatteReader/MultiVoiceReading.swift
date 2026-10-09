@@ -123,7 +123,7 @@ struct MultiVoiceAnalyzer {
         fallbackPolicy: SpeakerFallbackPolicy
     ) -> [PlannedSpeechSegment] {
         guard let plan else {
-            return Self.chunk(text: text).map {
+            return Self.chunk(text: text, maxLength: AppConfig.chunkMaxLength).map {
                 PlannedSpeechSegment(
                     text: $0,
                     voiceIdentifier: defaultVoiceIdentifier,
@@ -161,7 +161,7 @@ struct MultiVoiceAnalyzer {
                 speakerName = "Narrator"
             }
 
-            return Self.chunk(text: segment.text).map {
+            return Self.chunk(text: segment.text, maxLength: AppConfig.chunkMaxLength).map {
                 PlannedSpeechSegment(text: $0, voiceIdentifier: voiceIdentifier, kokoroVoiceID: profile?.kokoroVoiceID, piperModelPath: profile?.piperModelPath, speakerName: speakerName)
             }
         }
@@ -389,7 +389,7 @@ struct MultiVoiceAnalyzer {
         return digest.map { String(format: "%02x", $0) }.joined()
     }
 
-    static func chunk(text: String, maxLength: Int = 3_500) -> [String] {
+    static func chunk(text: String, maxLength: Int = AppConfig.chunkMaxLength) -> [String] {
         // Collapse arbitrary line breaks into spaces so PDF word-wrapping
         // doesn't create sentence boundaries.
         let normalized = text
@@ -399,25 +399,47 @@ struct MultiVoiceAnalyzer {
         let cleanText = normalized.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanText.isEmpty else { return [] }
 
-        var output: [String] = []
+        var result: [String] = []
         var current = ""
-        let sentences = cleanText.components(separatedBy: CharacterSet(charactersIn: ".!?"))
-
-        for sentence in sentences {
-            let trimmed = sentence.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { continue }
-            let candidate = current.isEmpty ? trimmed : current + ". " + trimmed
-
-            if candidate.count > maxLength {
-                if !current.isEmpty { output.append(current) }
-                current = trimmed
-            } else {
-                current = candidate
+        var i = cleanText.startIndex
+        
+        while i < cleanText.endIndex {
+            let char = cleanText[i]
+            current.append(char)
+            
+            // Check for sentence boundary: .!? followed by whitespace/uppercase/end
+            if char == "." || char == "!" || char == "?" {
+                let nextIndex = cleanText.index(after: i)
+                let isSentenceEnd = nextIndex >= cleanText.endIndex ||
+                                    cleanText[nextIndex].isWhitespace ||
+                                    cleanText[nextIndex].isUppercase
+                
+                if isSentenceEnd {
+                    // Include following whitespace in this chunk
+                    var afterPunct = nextIndex
+                    while afterPunct < cleanText.endIndex && cleanText[afterPunct].isWhitespace {
+                        current.append(cleanText[afterPunct])
+                        afterPunct = cleanText.index(after: afterPunct)
+                    }
+                    i = afterPunct
+                    
+                    // If we've hit the max length, save this chunk
+                    if current.count >= maxLength {
+                        result.append(current.trimmingCharacters(in: .whitespacesAndNewlines))
+                        current = ""
+                    }
+                    continue
+                }
             }
+            
+            i = cleanText.index(after: i)
         }
-
-        if !current.isEmpty { output.append(current) }
-        return output
+        
+        if !current.isEmpty {
+            result.append(current.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        
+        return result.isEmpty ? [cleanText] : result
     }
 }
 
