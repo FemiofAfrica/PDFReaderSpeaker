@@ -161,23 +161,13 @@ struct ContentView: View {
         HStack(spacing: 16) {
             // Logo + title
             HStack(spacing: 10) {
-                // Coffee mark
-                ZStack {
-                    Circle()
-                        .fill(
-                            LinearGradient(colors: [.bean, .espresso],
-                                           startPoint: .topLeading, endPoint: .bottomTrailing)
-                        )
-                        .frame(width: 34, height: 34)
-                        .shadow(color: .black.opacity(0.5), radius: 4, x: 0, y: 2)
-                    Circle()
-                        .fill(
-                            LinearGradient(colors: [.caramel, .butter],
-                                           startPoint: .topLeading, endPoint: .bottomTrailing)
-                        )
-                        .frame(width: 18, height: 18)
-                        .shadow(color: .caramel.opacity(0.4), radius: 4, x: 0, y: 1)
-                }
+                // LatteReader logo (Crema Waves app icon)
+                Image(nsImage: NSApp.applicationIconImage)
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: 38, height: 38)
+                    .shadow(color: .black.opacity(0.4), radius: 4, x: 0, y: 2)
+                    .accessibilityHidden(true)
 
                 VStack(alignment: .leading, spacing: 0) {
                     Text("LatteReader")
@@ -235,23 +225,13 @@ struct ContentView: View {
 
     private var emptyState: some View {
         VStack(spacing: 20) {
-            // Coffee mark (large)
-            ZStack {
-                Circle()
-                    .fill(
-                        LinearGradient(colors: [.bean, .espresso],
-                                       startPoint: .topLeading, endPoint: .bottomTrailing)
-                    )
-                    .frame(width: 72, height: 72)
-                    .shadow(color: .black.opacity(0.5), radius: 8, x: 0, y: 4)
-                Circle()
-                    .fill(
-                        LinearGradient(colors: [.caramel, .butter],
-                                       startPoint: .topLeading, endPoint: .bottomTrailing)
-                    )
-                    .frame(width: 38, height: 38)
-                    .shadow(color: .caramel.opacity(0.5), radius: 8, x: 0, y: 2)
-            }
+            // LatteReader logo (Crema Waves app icon)
+            Image(nsImage: NSApp.applicationIconImage)
+                .resizable()
+                .interpolation(.high)
+                .frame(width: 128, height: 128)
+                .shadow(color: .black.opacity(0.45), radius: 12, x: 0, y: 6)
+                .accessibilityLabel("LatteReader")
 
             VStack(spacing: 6) {
                 Text("Choose a PDF to begin")

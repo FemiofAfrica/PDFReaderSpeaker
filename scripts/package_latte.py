@@ -98,6 +98,15 @@ def main():
     for name in ['LatteReader', 'PagePrompt']:
         run(['/usr/bin/ditto', binaries / name, staged / 'Contents/MacOS' / name])
         (staged / 'Contents/MacOS' / name).chmod(0o755)
+    icon = ROOT / 'Resources/AppIcon/LatteReader.icns'
+    if icon.is_file():
+        (staged / 'Contents/Resources').mkdir(exist_ok=True)
+        run(['/usr/bin/ditto', icon, staged / 'Contents/Resources/LatteReader.icns'])
+        plist_path = staged / 'Contents/Info.plist'
+        staged_info = plistlib.loads(plist_path.read_bytes())
+        staged_info['CFBundleIconFile'] = 'LatteReader'
+        staged_info.pop('CFBundleIconName', None)
+        plist_path.write_bytes(plistlib.dumps(staged_info))
     run(['/usr/bin/codesign', '--force', '--deep', '--sign', '-', staged])
     run(['/usr/bin/codesign', '--verify', '--deep', '--strict', staged])
     expected = manifest(staged)
