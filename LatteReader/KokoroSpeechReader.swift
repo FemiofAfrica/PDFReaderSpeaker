@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import OSLog
 
 final class KokoroSpeechReader: NSObject, ObservableObject {
     @Published private(set) var isSpeaking = false
@@ -26,11 +27,12 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
     private var failedIndices = Set<Int>()
     private var pendingCallbacks: [Int: [() -> Void]] = [:]
     private var generationID = UUID()
-    private let renderQueue = DispatchQueue(label: "LatteReader.KokoroRender", qos: .userInitiated, attributes: .concurrent)
+    private var jobInFlight = false
+    private let renderQueue = DispatchQueue(label: "LatteReader.KokoroRender", qos: .userInitiated)
     private let stateQueue = DispatchQueue(label: "LatteReader.KokoroState")
     private let primarySynthesizer: VoiceSynthesizer
     private let fallbackSynthesizer: VoiceSynthesizer
-    private let prebufferCount = 8
+    private let logger = Logger(subsystem: "com.femiofafrica.lattereader", category: "timing")
 
     var availability: VoiceEngineAvailability { primarySynthesizer.availability }
     var voices: [KokoroVoice] { (primarySynthesizer as? KokoroVoiceEngine)?.availableVoices ?? [] }
@@ -50,12 +52,13 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
 
     func start(segments: [PlannedSpeechSegment], rate _: Double = 1.0) {
         stop()
-        enqueue(segments)
+        enqueue(segments, preserveFirstSegment: true)
         guard !queue.isEmpty else { return }
         isSpeaking = true
         isPaused = false
-        prebuffer(from: currentIndex)
+        logger.notice("Rendering chunk 0 (start)")
         playWhenReady(index: currentIndex, generationID: generationID)
+        fillRenderPipeline()
     }
 
     /// Append more segments to the queue while playback is active.
@@ -66,24 +69,16 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
             newSegments.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         )
         guard !merged.isEmpty else { return }
-        let startIndex = queue.count
         queue.append(contentsOf: merged)
-        if isSpeaking || isPaused {
-            prebuffer(from: startIndex)
-        } else {
-            // Playback had finished — start playing the newly queued content.
-            currentIndex = startIndex
-            isSpeaking = true
-            isPaused = false
-            prebuffer(from: startIndex)
-            playWhenReady(index: startIndex, generationID: generationID)
-        }
+        logger.notice("Appended \(merged.count, privacy: .public) segments (total \(self.queue.count, privacy: .public))")
+        fillRenderPipeline()
     }
 
     /// Shared enqueue logic used by both start() and append().
-    private func enqueue(_ segments: [PlannedSpeechSegment]) {
+    private func enqueue(_ segments: [PlannedSpeechSegment], preserveFirstSegment: Bool = false) {
         queue = mergeConsecutiveSameVoice(
-            segments.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            segments.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty },
+            preserveFirstSegment: preserveFirstSegment
         )
         currentIndex = 0
         generationID = UUID()
@@ -103,7 +98,18 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
     }
 
     func stop() {
+        // Bump generation first to invalidate in-flight renders
         generationID = UUID()
+        logger.notice("Stop: new generationID to drop stale work")
+        
+        // If there's a job in flight at the worker, terminate process immediately
+        let hasJobInFlight = stateQueue.sync { jobInFlight }
+        if hasJobInFlight {
+            logger.notice("Killed in-flight stale job, terminating worker")
+            KokoroWorker.shared.terminateWorkerProcess()
+            stateQueue.sync { jobInFlight = false }
+        }
+        
         player?.stop()
         player = nil
         queue.removeAll()
@@ -123,10 +129,45 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
         }
         tempDirectory = nil
     }
+    
 
     func refreshProgress() {
         currentTime = player?.currentTime ?? 0
         duration = player?.duration ?? 0
+    }
+    
+    /// Skip to a specific chunk index
+    func skipToChunk(_ index: Int) {
+        guard index >= 0, index < queue.count else { return }
+        player?.stop()
+        currentIndex = index
+        
+        // Check if there's an in-flight job and if it's before the target
+        let (hasJobInFlight, inFlightIndex) = stateQueue.sync { 
+            (jobInFlight, renderingIndices.min())
+        }
+        
+        if hasJobInFlight, let inFlightIdx = inFlightIndex, inFlightIdx < index {
+            // In-flight job is before target, kill it
+            logger.notice("Skip: in-flight job at chunk \(inFlightIdx, privacy: .public) is before target \(index, privacy: .public), killing worker")
+            KokoroWorker.shared.terminateWorkerProcess()
+            stateQueue.sync { jobInFlight = false }
+            generationID = UUID()
+        } else {
+            logger.notice("Skip to chunk \(index, privacy: .public): keeping useful in-flight work")
+        }
+        
+        // Enqueue target and read-ahead
+        logger.notice("Rendering chunk \(index, privacy: .public) (skip target)")
+        playWhenReady(index: index, generationID: generationID)
+        fillRenderPipeline()
+    }
+    
+    /// Seek to a specific time within the current chunk
+    func seek(to time: TimeInterval) {
+        guard let player else { return }
+        player.currentTime = max(0, min(time, player.duration))
+        currentTime = player.currentTime
     }
 
     private func playWhenReady(index: Int, generationID expectedGenerationID: UUID) {
@@ -162,7 +203,9 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
             currentTime = 0
             isSpeaking = true
             isPaused = false
-            prebuffer(from: index + 1)
+            logger.notice("Playback started: chunk \(index, privacy: .public)")
+            // Fill the render pipeline to keep worker busy
+            fillRenderPipeline()
         } catch {
             NSLog("Kokoro playback failed for segment \(index): \(error.localizedDescription)")
             currentIndex = index + 1
@@ -170,19 +213,26 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
         }
     }
 
-    /// Merge adjacent segments with the same Kokoro voice into a single
-    /// longer segment. This reduces the number of render calls and
-    /// eliminates the gaps between consecutive same-voice chunks.
-    private func mergeConsecutiveSameVoice(_ segments: [PlannedSpeechSegment]) -> [PlannedSpeechSegment] {
+    /// Merge adjacent segments with the same Kokoro voice, up to chunkMaxLength.
+    /// This reduces render calls but prevents page-sized chunks that take 45+ seconds.
+    private func mergeConsecutiveSameVoice(_ segments: [PlannedSpeechSegment], preserveFirstSegment: Bool = false) -> [PlannedSpeechSegment] {
         guard !segments.isEmpty else { return [] }
         var merged: [PlannedSpeechSegment] = []
         var current = segments[0]
+        
         for i in 1..<segments.count {
             let next = segments[i]
-            if current.kokoroVoiceID == next.kokoroVoiceID {
-                let sep = current.text.last.flatMap { ".!?".contains($0) } == true ? " " : ". "
+            let sep = current.text.last.flatMap { ".!?".contains($0) } == true ? " " : ". "
+            let combined = current.text + sep + next.text
+            
+            // Don't merge into or out of segment 0 when preserveFirstSegment is true (fast startup)
+            let isFirstSegment = merged.isEmpty
+            let canMergeFirst = !preserveFirstSegment || !isFirstSegment
+            
+            // Only merge if same voice AND within chunkMaxLength AND allowed to merge first
+            if canMergeFirst && current.kokoroVoiceID == next.kokoroVoiceID && combined.count <= AppConfig.chunkMaxLength {
                 current = PlannedSpeechSegment(
-                    text: current.text + sep + next.text,
+                    text: combined,
                     voiceIdentifier: current.voiceIdentifier,
                     kokoroVoiceID: current.kokoroVoiceID,
                     piperModelPath: current.piperModelPath ?? next.piperModelPath,
@@ -197,15 +247,56 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
         return merged
     }
 
-    private func prebuffer(from index: Int) {
-        let expectedGenerationID = generationID
-        for nextIndex in index..<(min(index + prebufferCount, queue.count)) {
-            renderSegment(at: nextIndex, generationID: expectedGenerationID)
+    /// Fill the render pipeline to keep the worker busy continuously.
+    /// Renders up to 3 segments ahead of the playhead when the worker is idle.
+    private func fillRenderPipeline() {
+        let (rendered, rendering) = stateQueue.sync {
+            (self.renderedAudio.keys.sorted(), self.renderingIndices.sorted())
+        }
+        
+        // Count RENDERED (not in-flight) segments ahead of current position
+        let renderedAhead = rendered.filter { $0 > self.currentIndex }.count
+        
+        // Keep rendering until we have 3 rendered segments ahead
+        // Don't count in-flight work as "buffered" since it's not ready to play
+        while renderedAhead < 3 {
+            let allRenderedOrRendering = Set(rendered).union(rendering)
+            
+            // Find first unrendered segment starting from current index
+            var foundSegment = false
+            for i in self.currentIndex..<self.queue.count {
+                if !allRenderedOrRendering.contains(i) {
+                    self.renderSegment(at: i, generationID: self.generationID, completion: nil)
+                    foundSegment = true
+                    break
+                }
+            }
+            
+            // If no more segments to render, we're done
+            if !foundSegment {
+                break
+            }
+            
+            // Re-check rendered count after starting a new render
+            let newRendered = stateQueue.sync { self.renderedAudio.keys.sorted() }
+            let newRenderedAhead = newRendered.filter { $0 > self.currentIndex }.count
+            
+            // If count didn't increase, we started an in-flight job, keep going
+            if newRenderedAhead <= renderedAhead {
+                continue
+            } else {
+                break
+            }
         }
     }
 
     private func renderSegment(at index: Int, generationID expectedGenerationID: UUID, completion: (() -> Void)? = nil) {
-        guard expectedGenerationID == generationID, index < queue.count else { return }
+        // Drop stale work immediately
+        guard expectedGenerationID == generationID else {
+            logger.notice("Stale job dropped before render (generation mismatch)")
+            return
+        }
+        guard index < queue.count else { return }
         var shouldRender = false
         stateQueue.sync {
             if renderedAudio[index] == nil, !renderingIndices.contains(index), !failedIndices.contains(index) {
@@ -228,14 +319,38 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
         let segment = queue[index]
         renderQueue.async { [weak self] in
             guard let self else { return }
+            
             do {
                 let outputURL = try self.makeOutputURL(index: index)
-                if primarySynthesizer.availability.isAvailable {
-                    try primarySynthesizer.synthesize(segment: segment, outputURL: outputURL)
-                } else {
-                    NSLog("Kokoro unavailable: \(primarySynthesizer.availability.message). Falling back to Piper.")
-                    try fallbackSynthesizer.synthesize(segment: segment, outputURL: outputURL)
+                
+                // Pass generation check closure to be evaluated AFTER lock acquisition
+                let isStillCurrent = { [weak self] in
+                    guard let self = self else { return false }
+                    return expectedGenerationID == self.generationID
                 }
+                
+                // Mark job in flight before calling worker
+                self.stateQueue.sync { self.jobInFlight = true }
+                
+                if primarySynthesizer.availability.isAvailable {
+                    try primarySynthesizer.synthesize(segment: segment, outputURL: outputURL, isStillCurrent: isStillCurrent)
+                } else {
+                    logger.notice("Kokoro unavailable, falling back to Piper")
+                    try fallbackSynthesizer.synthesize(segment: segment, outputURL: outputURL, isStillCurrent: isStillCurrent)
+                }
+                
+                // Job returned, clear in-flight flag
+                self.stateQueue.sync { self.jobInFlight = false }
+                
+                // Re-check generation AFTER synthesize returns, before touching state
+                guard expectedGenerationID == self.generationID else {
+                    logger.notice("Stale job completed but generation changed, discarding result")
+                    self.stateQueue.sync {
+                        self.renderingIndices.remove(index)
+                    }
+                    return
+                }
+                
                 self.stateQueue.sync {
                     self.renderedAudio[index] = outputURL
                     self.renderingIndices.remove(index)
@@ -245,8 +360,25 @@ final class KokoroSpeechReader: NSObject, ObservableObject {
                         DispatchQueue.main.async(execute: cb)
                     }
                 }
+            } catch is CancellationError {
+                // Job was cancelled (stale generation), don't log as failure
+                self.stateQueue.sync {
+                    self.jobInFlight = false
+                    self.renderingIndices.remove(index)
+                }
             } catch {
+                self.stateQueue.sync { self.jobInFlight = false }
                 NSLog("Kokoro/Piper render failed for \(segment.speakerName): \(error.localizedDescription)")
+                
+                // Re-check generation before recording failure
+                guard expectedGenerationID == self.generationID else {
+                    logger.notice("Stale job failed but generation changed, discarding")
+                    self.stateQueue.sync {
+                        self.renderingIndices.remove(index)
+                    }
+                    return
+                }
+                
                 self.stateQueue.sync {
                     _ = self.renderingIndices.remove(index)
                     self.failedIndices.insert(index)
