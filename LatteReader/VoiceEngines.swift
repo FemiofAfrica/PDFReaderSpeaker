@@ -1,4 +1,7 @@
 import Foundation
+import OSLog
+
+struct CancellationError: Error {}
 
 struct VoiceEngineAvailability: Hashable {
     let isAvailable: Bool
@@ -48,29 +51,32 @@ final class KokoroWorker {
     static let shared = KokoroWorker()
 
     private let lock = NSLock()
+    private let processLock = NSLock()  // Separate lock for process reference only
+    private var isRestartScheduled = false
+    private var restartAttempts = 0  // Track restart attempts to prevent infinite recursion
     private var process: Process?
     private var input: FileHandle?
     private var output: FileHandle?
+    private let logger = Logger(subsystem: "com.femiofafrica.lattereader", category: "timing")
 
     private var executablePath: String? {
-        [
-            FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Library/Application Support/LatteReader/kokoro/kokoro-worker").path,
-            Bundle.main.resourceURL?.appendingPathComponent("kokoro/kokoro-worker").path,
-            FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".local/bin/kokoro-worker").path,
-            "/opt/homebrew/bin/kokoro-worker",
-            "/usr/local/bin/kokoro-worker"
-        ].compactMap { $0 }.first(where: FileManager.default.isExecutableFile)
+        AppConfig.findExecutable(in: AppConfig.kokoroWorkerPaths)
     }
 
     var isAvailable: Bool { executablePath != nil }
 
-    func synthesize(segment: PlannedSpeechSegment, outputURL: URL) throws {
+    func synthesize(segment: PlannedSpeechSegment, outputURL: URL, isStillCurrent: () -> Bool) throws {
         lock.lock()
         defer { lock.unlock() }
 
         try ensureStarted()
+        
+        // Check generation AFTER acquiring lock to drop stale work
+        guard isStillCurrent() else {
+            logger.notice("Stale job dropped after lock (segment no longer current)")
+            throw CancellationError()
+        }
+        
         guard let input, let output else { throw CocoaError(.executableLoad) }
 
         let payload: [String: Any] = [
@@ -81,17 +87,23 @@ final class KokoroWorker {
             "lang": "en-us"
         ]
         let data = try JSONSerialization.data(withJSONObject: payload)
+        logger.notice("Job written to worker stdin (\(segment.text.prefix(50), privacy: .public)...)")
         input.write(data)
         input.write(Data("\n".utf8))
+        
+        // Job is now in flight at the worker
 
         guard let line = output.readLine(),
               let responseData = line.data(using: .utf8),
               let response = try JSONSerialization.jsonObject(with: responseData) as? [String: Any],
               response["ok"] as? Bool == true,
               FileManager.default.fileExists(atPath: outputURL.path) else {
-            restart()
+            logger.log(level: .error, "Worker response failed, restarting")
+            restart(reason: "Bad response or missing output file")
             throw CocoaError(.executableLoad)
         }
+        
+        logger.notice("Audio ready from worker")
     }
 
     private static func prepareTextForSpeech(_ text: String) -> String {
@@ -106,18 +118,19 @@ final class KokoroWorker {
     }
 
     func warmUp() {
-        DispatchQueue.global(qos: .background).async { [weak self] in
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             lock.lock()
             defer { lock.unlock() }
             do {
                 try ensureStarted()
-                // Send a tiny ping render to force model loading.
+                // Send a tiny ping render to force model loading and keep worker warm.
                 guard let input, let output else { return }
+                let outputPath = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("kokoro-warmup-\(UUID().uuidString).wav")
                 let ping: [String: Any] = [
-                    "text": "Hello.",
-                    "output": FileManager.default.temporaryDirectory
-                        .appendingPathComponent("kokoro-warmup-\(UUID().uuidString).wav").path,
+                    "text": "Warming up.",
+                    "output": outputPath.path,
                     "voice": "af_heart",
                     "speed": 1.0,
                     "lang": "en-us",
@@ -125,15 +138,31 @@ final class KokoroWorker {
                 let data = try JSONSerialization.data(withJSONObject: ping)
                 input.write(data)
                 input.write(Data("\n".utf8))
-                _ = output.readLine()
-                try? FileManager.default.removeItem(at: URL(fileURLWithPath: ping["output"] as! String))
+                
+                // Wait for response to ensure model is loaded
+                if let response = output.readLine() {
+                    NSLog("Kokoro worker warmed up: \(response)")
+                }
+                try? FileManager.default.removeItem(at: outputPath)
             } catch {
-                // Warm-up is best-effort; swallow errors silently.
+                NSLog("Kokoro warm-up failed: \(error)")
             }
         }
     }
+    
+    /// Keep worker warm by preventing it from shutting down
+    func keepWarm() {
+        // The worker stays persistent as long as the process is running
+        // This just ensures it's started
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            lock.lock()
+            defer { lock.unlock() }
+            _ = try? ensureStarted()
+        }
+    }
 
-    private func ensureStarted() throws {
+    private     func ensureStarted() throws {
         if let process, process.isRunning { return }
         guard let executablePath else { throw CocoaError(.fileNoSuchFile) }
 
@@ -144,24 +173,111 @@ final class KokoroWorker {
         process.standardInput = inputPipe
         process.standardOutput = outputPipe
         process.standardError = FileHandle.nullDevice
+        
+        // Use DispatchGroup for timeout instead of process.waitUntilExit
+        let startGroup = DispatchGroup()
+        startGroup.enter()
+        
         try process.run()
 
+        // Store process reference under both locks
+        processLock.lock()
         self.process = process
+        processLock.unlock()
+        
         input = inputPipe.fileHandleForWriting
         output = outputPipe.fileHandleForReading
+        
+        restartAttempts = 0  // Reset counter on successful start
 
-        guard let readyLine = output?.readLine(), readyLine.contains("ready") else {
-            restart()
+        // Read ready line with timeout
+        var readyLine: String?
+        DispatchQueue.global().async {
+            readyLine = self.output?.readLine()
+            startGroup.leave()
+        }
+        
+        // Increased timeout from 5s to 30s for cold model loading on busy CPU
+        if startGroup.wait(timeout: .now() + 30.0) == .timedOut || !(readyLine?.contains("ready") ?? false) {
+            let reason = startGroup.wait(timeout: .now()) == .timedOut ? "Ready timeout (30s)" : "No ready line"
+            logger.log(level: .error, "Worker startup failed: \(reason, privacy: .public)")
+            restart(reason: reason)
             throw CocoaError(.executableLoad)
         }
+        
+        logger.notice("Worker started and ready")
     }
 
-    private func restart() {
+    private func restart(reason: String) {
+        // Must be called with lock held
+        logger.notice("Restarting worker: \(reason, privacy: .public)")
+        isRestartScheduled = false  // Clear flag when actually restarting
+        
+        // Prevent infinite recursion: allow one relaunch attempt, then fail
+        restartAttempts += 1
+        if restartAttempts > 1 {
+            logger.log(level: .error, "Restart attempt limit reached, giving up")
+            return
+        }
+        
         try? input?.close()
-        process?.terminate()
+        if let process, process.isRunning {
+            process.terminate()
+            // Wait briefly for graceful termination
+            let terminateGroup = DispatchGroup()
+            terminateGroup.enter()
+            DispatchQueue.global().async {
+                process.waitUntilExit()
+                terminateGroup.leave()
+            }
+            // Force kill if it doesn't terminate within 2 seconds
+            if terminateGroup.wait(timeout: .now() + 2.0) == .timedOut {
+                process.interrupt()
+            }
+        }
+        
+        processLock.lock()
         process = nil
+        processLock.unlock()
+        
         input = nil
         output = nil
+        try? ensureStarted()
+    }
+    
+    /// Terminate the worker process immediately without waiting for the main lock.
+    /// The blocked read will get EOF and throw, then we relaunch under the lock (once).
+    func terminateWorkerProcess() {
+        // Get process reference under its own small lock, NOT the main lock
+        // (main lock is held by synthesize() blocked on read)
+        processLock.lock()
+        let processToTerminate = self.process
+        processLock.unlock()
+        
+        // Terminate WITHOUT holding the main lock
+        if let process = processToTerminate, process.isRunning {
+            process.terminate()
+            self.logger.notice("Terminated worker process PID \(process.processIdentifier, privacy: .public) (no main lock)")
+        }
+        
+        // Now schedule restart under main lock
+        lock.lock()
+        defer { lock.unlock() }
+        
+        guard !isRestartScheduled else { return }
+        isRestartScheduled = true
+        
+        // Relaunch in background after brief delay to ensure termination completes
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            guard let self = self else { return }
+            self.lock.lock()
+            defer { self.lock.unlock() }
+            
+            // Only restart if still scheduled (not already restarted by error handler)
+            if self.isRestartScheduled {
+                self.restart(reason: "Relaunch after process termination")
+            }
+        }
     }
 }
 
@@ -179,15 +295,7 @@ private extension FileHandle {
 
 struct KokoroVoiceEngine: VoiceSynthesizer {
     private var workerPath: String? {
-        [
-            FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Library/Application Support/LatteReader/kokoro/kokoro-worker").path,
-            Bundle.main.resourceURL?.appendingPathComponent("kokoro/kokoro-worker").path,
-            FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".local/bin/kokoro-worker").path,
-            "/opt/homebrew/bin/kokoro-worker",
-            "/usr/local/bin/kokoro-worker"
-        ].compactMap { $0 }.first(where: FileManager.default.isExecutableFile)
+        AppConfig.findExecutable(in: AppConfig.kokoroWorkerPaths)
     }
 
     private var modelURL: URL? {
@@ -215,16 +323,15 @@ struct KokoroVoiceEngine: VoiceSynthesizer {
 
     var isAvailable: Bool { availability.isAvailable }
 
-    func synthesize(segment: PlannedSpeechSegment, outputURL: URL) throws {
-        try KokoroWorker.shared.synthesize(segment: segment, outputURL: outputURL)
+    func synthesize(segment: PlannedSpeechSegment, outputURL: URL, isStillCurrent: () -> Bool) throws {
+        try KokoroWorker.shared.synthesize(segment: segment, outputURL: outputURL, isStillCurrent: isStillCurrent)
     }
 }
 
 struct PiperVoiceEngine: VoiceSynthesizer {
     var availability: VoiceEngineAvailability {
-        guard FileManager.default.isExecutableFile(atPath: "/opt/homebrew/bin/piper")
-            || FileManager.default.isExecutableFile(atPath: "/usr/local/bin/piper") else {
-            return VoiceEngineAvailability(isAvailable: false, message: "Install Piper and place a .onnx voice in ~/Library/Application Support/piper-voices/.")
+        guard AppConfig.findExecutable(in: AppConfig.piperExecutablePaths) != nil else {
+            return VoiceEngineAvailability(isAvailable: false, message: "Piper not found. Install via Homebrew or place in bundle.")
         }
         guard !LocalVoiceAssetLocator.onnxFiles(in: LocalVoiceAssetLocator.piperRoots).isEmpty else {
             return VoiceEngineAvailability(isAvailable: false, message: "Place a Piper .onnx voice in ~/Library/Application Support/piper-voices/.")
@@ -232,11 +339,16 @@ struct PiperVoiceEngine: VoiceSynthesizer {
         return VoiceEngineAvailability(isAvailable: true, message: "Piper fallback ready.")
     }
 
-    func synthesize(segment: PlannedSpeechSegment, outputURL: URL) throws {
+    func synthesize(segment: PlannedSpeechSegment, outputURL: URL, isStillCurrent: () -> Bool) throws {
+        // Check if stale before launching piper
+        guard isStillCurrent() else {
+            throw CancellationError()
+        }
+        
         guard let modelPath = segment.piperModelPath ?? LocalVoiceAssetLocator.onnxFiles(in: LocalVoiceAssetLocator.piperRoots).first?.path else {
             throw CocoaError(.fileNoSuchFile)
         }
-        guard let executable = ["/opt/homebrew/bin/piper", "/usr/local/bin/piper"].first(where: FileManager.default.isExecutableFile) else {
+        guard let executable = AppConfig.findExecutable(in: AppConfig.piperExecutablePaths) else {
             throw CocoaError(.fileNoSuchFile)
         }
         let process = Process()
@@ -244,10 +356,30 @@ struct PiperVoiceEngine: VoiceSynthesizer {
         process.arguments = ["--model", modelPath, "--output-file", outputURL.path]
         let inputPipe = Pipe()
         process.standardInput = inputPipe
+        
         try process.run()
         inputPipe.fileHandleForWriting.write(Data(segment.text.utf8))
         inputPipe.fileHandleForWriting.closeFile()
-        process.waitUntilExit()
+        
+        // Wait with timeout to prevent hanging
+        let waitGroup = DispatchGroup()
+        waitGroup.enter()
+        DispatchQueue.global().async {
+            process.waitUntilExit()
+            waitGroup.leave()
+        }
+        
+        if waitGroup.wait(timeout: .now() + AppConfig.workerProcessTimeout) == .timedOut {
+            process.terminate()
+            // Force kill if needed
+            DispatchQueue.global().asyncAfter(deadline: .now() + 2.0) {
+                if process.isRunning {
+                    process.interrupt()
+                }
+            }
+            throw CocoaError(.executableLoad)
+        }
+        
         if process.terminationStatus != 0 || !FileManager.default.fileExists(atPath: outputURL.path) {
             throw CocoaError(.executableLoad)
         }

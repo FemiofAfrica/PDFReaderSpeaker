@@ -110,6 +110,11 @@ final class PDFViewProxy: ObservableObject {
     func currentSelectionText() -> String? {
         pdfView?.currentSelection?.string
     }
+    
+    /// Returns the current PDFSelection object
+    var currentSelection: PDFSelection? {
+        pdfView?.currentSelection
+    }
 }
 
 // MARK: - PDFKit View
@@ -129,6 +134,7 @@ struct PDFKitView: NSViewRepresentable {
     /// should be active at a time.
     let isActive: Bool
     let proxy: PDFViewProxy
+    var highlighter: SpeechHighlighter?
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -142,7 +148,10 @@ struct PDFKitView: NSViewRepresentable {
         pdfView.displayMode = displayMode
         pdfView.backgroundColor = NSColor(red: 0.290, green: 0.208, blue: 0.157, alpha: 1.0) // chocolateMedium
 
-        if isActive { proxy.pdfView = pdfView }
+        if isActive { 
+            proxy.pdfView = pdfView
+            highlighter?.setPDFDocument(document, view: pdfView)
+        }
         context.coordinator.lastPage = currentPage
         return pdfView
     }
@@ -159,7 +168,10 @@ struct PDFKitView: NSViewRepresentable {
         }
 
         // Handle proxy activation changes
-        if isActive { proxy.pdfView = nsView }
+        if isActive { 
+            proxy.pdfView = nsView
+            highlighter?.setPDFDocument(document, view: nsView)
+        }
 
         // Handle page navigation — only if we're not already on this page
         guard context.coordinator.lastPage != currentPage else { return }

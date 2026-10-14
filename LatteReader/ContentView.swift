@@ -1,4 +1,5 @@
 import AppKit
+import OSLog
 import PDFKit
 import PagePromptSupport
 import SwiftUI
@@ -22,9 +23,21 @@ struct ContentView: View {
     )
     @StateObject private var pdfProxy = PDFViewProxy()
     @StateObject private var pdfProxyPage = PDFViewProxy()
+    @StateObject private var playbackControls = PlaybackControls()
+    @StateObject private var errorHandler = ErrorHandler()
+    @StateObject private var speechHighlighter = SpeechHighlighter()
+    
+    private let voiceChangeDebouncer = Debouncer(delay: 0.5)
 
     @State private var selectedVoiceEngine: VoiceEngine = .kokoro
+    @State private var currentChunks: [PlannedSpeechSegment] = []
+    @State private var lastPlayedPageIndex: Int?
+    @State private var documentForContinuation: LoadedPDF?
+    @State private var continuationTimer: Timer?
+    @State private var pausedPageIndex: Int?
 
+    private let logger = Logger(subsystem: "com.femiofafrica.lattereader", category: "timing")
+    
     private var activeProxy: PDFViewProxy {
         selectedReadMode == .pageByPage ? pdfProxyPage : pdfProxy
     }
@@ -45,6 +58,8 @@ struct ContentView: View {
     @State private var isImporterPresented = false
     @State private var keyMonitor: Any?
     @State private var queueStatus: String?
+    @State private var showQueue = false
+    @State private var queuedItems: [(id: UUID, text: String, preview: String)] = []
 
     // Transport / playback state
     @State private var isPlaying = false
@@ -115,27 +130,72 @@ struct ContentView: View {
             switch selectedVoiceEngine {
             case .kokoro where kokoroReader.duration > 0:
                 kokoroReader.refreshProgress()
-                playbackProgress = min(1, kokoroReader.currentTime / kokoroReader.duration)
+                let progress = kokoroReader.currentTime / kokoroReader.duration
+                playbackProgress = progress.isFinite ? min(1, max(0, progress)) : 0
+                updateHighlightForKokoro()
             case .piper where piperReader.duration > 0:
-                playbackProgress = min(1, piperReader.currentTime / piperReader.duration)
+                let progress = piperReader.currentTime / piperReader.duration
+                playbackProgress = progress.isFinite ? min(1, max(0, progress)) : 0
+                updateHighlightForPiper()
             default:
                 break
             }
+            playbackControls.updateSkipCapabilities()
         }
         .onAppear {
             // Pre-warm the Kokoro worker so the model is loaded
             // before the user presses Play.
             kokoroReader.warmUp()
-            // AppKit-level ⌘⌥Q monitor for queueing selections.
+            
+            // Keep worker warm with periodic keep-alive
+            Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { _ in
+                KokoroWorker.shared.keepWarm()
+            }
+            
+            // Set up playback controls
+            playbackControls.setEngines(kokoro: kokoroReader, piper: piperReader)
+            playbackControls.setActiveEngine(selectedVoiceEngine)
+            
+            // AppKit-level keyboard monitors for shortcuts
             // Must use a local monitor — SwiftUI shortcuts are unreliable
             // in debug builds and conflict with system ⌘Q / ⌘⇧Q.
             let monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                // ⌘⌥Q — Queue selection
                 if event.modifierFlags.contains(.command),
                    event.modifierFlags.contains(.option),
                    event.charactersIgnoringModifiers?.lowercased() == "q" {
                     queueCurrentSelection()
                     return nil
                 }
+                
+                // ⌘← — Skip backward sentence
+                if event.modifierFlags.contains(.command),
+                   event.keyCode == 123 { // Left arrow
+                    playbackControls.skipBackwardSentence()
+                    return nil
+                }
+                
+                // ⌘→ — Skip forward sentence
+                if event.modifierFlags.contains(.command),
+                   event.keyCode == 124 { // Right arrow
+                    playbackControls.skipForwardSentence()
+                    return nil
+                }
+                
+                // ⌥← — Skip backward 15s
+                if event.modifierFlags.contains(.option),
+                   event.keyCode == 123 { // Left arrow
+                    playbackControls.skipBackwardTime()
+                    return nil
+                }
+                
+                // ⌥→ — Skip forward 15s
+                if event.modifierFlags.contains(.option),
+                   event.keyCode == 124 { // Right arrow
+                    playbackControls.skipForwardTime()
+                    return nil
+                }
+                
                 return event
             }
             keyMonitor = monitor
@@ -143,9 +203,10 @@ struct ContentView: View {
         .onDisappear {
             if let m = keyMonitor { NSEvent.removeMonitor(m) }
         }
-        .onChange(of: selectedVoiceEngine) { _ in
+        .onChange(of: selectedVoiceEngine) { newEngine in
             if kokoroReader.isSpeaking || kokoroReader.isPaused { kokoroReader.stop() }
             if piperReader.isSpeaking || piperReader.isPaused { piperReader.stop() }
+            playbackControls.setActiveEngine(newEngine)
         }
         .fileImporter(
             isPresented: $isImporterPresented,
@@ -153,6 +214,7 @@ struct ContentView: View {
             allowsMultipleSelection: false,
             onCompletion: handleImport
         )
+        .errorAlert(errorHandler: errorHandler)
     }
 
     // MARK: - Top Bar
@@ -291,12 +353,88 @@ struct ContentView: View {
                         Text(queueStatus)
                             .font(.system(size: 11, weight: .medium))
                         Spacer()
+                        if !queuedItems.isEmpty {
+                            Button {
+                                showQueue.toggle()
+                            } label: {
+                                Image(systemName: showQueue ? "chevron.up" : "list.bullet")
+                                    .font(.system(size: 10, weight: .bold))
+                            }
+                            .buttonStyle(.plain)
+                        }
                     }
                     .foregroundColor(.butter)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
                     .background(Color.caramel.opacity(0.15))
                     .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                }
+                
+                // ── Queue panel ──
+                if showQueue, !queuedItems.isEmpty {
+                    Bezel {
+                        VStack(alignment: .leading, spacing: 8) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack {
+                                    PanelHeader(label: "Queue (\(queuedItems.count))")
+                                    Spacer()
+                                    Button {
+                                        clearQueue()
+                                        showQueue = false
+                                    } label: {
+                                        Text("Clear All")
+                                            .font(.system(size: 9, weight: .bold))
+                                            .textCase(.uppercase)
+                                            .foregroundColor(.ember)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                                Text("Items play next, then reading continues from where each ends.")
+                                    .font(.system(size: 9))
+                                    .foregroundColor(.textMuted)
+                                    .lineLimit(2)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            
+                            ScrollView {
+                                VStack(spacing: 6) {
+                                    ForEach(Array(queuedItems.enumerated()), id: \.element.id) { index, item in
+                                        HStack(spacing: 8) {
+                                            Text("\(index + 1)")
+                                                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                                .foregroundColor(.textMuted)
+                                                .frame(width: 20)
+                                            
+                                            Text(item.preview)
+                                                .font(.system(size: 10))
+                                                .foregroundColor(.cream.opacity(0.8))
+                                                .lineLimit(2)
+                                            
+                                            Spacer()
+                                            
+                                            Button {
+                                                queuedItems.remove(at: index)
+                                                if queuedItems.isEmpty {
+                                                    showQueue = false
+                                                }
+                                            } label: {
+                                                Image(systemName: "xmark.circle.fill")
+                                                    .font(.system(size: 12))
+                                                    .foregroundColor(.textMuted)
+                                            }
+                                            .buttonStyle(.plain)
+                                        }
+                                        .padding(8)
+                                        .background(Color.black.opacity(0.3))
+                                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                                    }
+                                }
+                            }
+                            .frame(maxHeight: 200)
+                        }
+                        .padding(12)
+                    }
                     .transition(.move(edge: .top).combined(with: .opacity))
                 }
 
@@ -613,7 +751,8 @@ struct ContentView: View {
                         currentPage: $selectedPageID,
                         displayMode: .singlePageContinuous,
                         isActive: selectedReadMode == .fullDocument,
-                        proxy: pdfProxy
+                        proxy: pdfProxy,
+                        highlighter: speechHighlighter
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .opacity(selectedReadMode == .fullDocument ? 1 : 0)
@@ -624,7 +763,8 @@ struct ContentView: View {
                         currentPage: $selectedPageID,
                         displayMode: .singlePage,
                         isActive: selectedReadMode == .pageByPage,
-                        proxy: pdfProxyPage
+                        proxy: pdfProxyPage,
+                        highlighter: speechHighlighter
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .opacity(selectedReadMode == .pageByPage ? 1 : 0)
@@ -671,18 +811,40 @@ struct ContentView: View {
                         .frame(width: 14, height: 14)
                 }
                 .buttonStyle(TransportBtnStyle())
+                .help("Stop")
 
-                // Queue selection (test)
-                Button { queueCurrentSelection() } label: {
-                    Text("Q")
-                        .font(.system(size: 12, weight: .bold))
+                // Skip backward (sentence)
+                Button {
+                    playbackControls.skipBackwardSentence()
+                } label: {
+                    Image(systemName: "backward.end.fill")
+                        .font(.system(size: 11))
                         .foregroundColor(.espresso)
-                        .frame(width: 22, height: 22)
-                        .background(Color.butter.opacity(0.3))
-                        .clipShape(RoundedRectangle(cornerRadius: 5))
                 }
-                .buttonStyle(PlainButtonStyle())
-                .help("⌘⌥Q — Queue selection")
+                .buttonStyle(TransportBtnStyle())
+                .disabled(!playbackControls.canSkipBackward)
+                .help("⌘← — Previous sentence")
+
+                // Queue controls
+                Button { 
+                    showQueue.toggle()
+                } label: {
+                    ZStack(alignment: .topTrailing) {
+                        Image(systemName: "list.bullet")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundColor(.espresso)
+                        
+                        if !queuedItems.isEmpty {
+                            Circle()
+                                .fill(Color.ember)
+                                .frame(width: 8, height: 8)
+                                .offset(x: 4, y: -4)
+                        }
+                    }
+                    .frame(width: 22, height: 22)
+                }
+                .buttonStyle(TransportBtnStyle())
+                .help("View Queue (\(queuedItems.count) items)\n\nQueued items play next after the current sentence finishes.\nReading then continues from the end of the queued passage.")
 
                 // Play/Pause
                 Button {
@@ -709,26 +871,25 @@ struct ContentView: View {
                     }
                 }
                 .buttonStyle(PrimaryTransportBtnStyle())
-
-                // Pause
+                
+                // Skip forward (sentence)
                 Button {
-                    pausePlayback()
+                    playbackControls.skipForwardSentence()
                 } label: {
-                    HStack(spacing: 4) {
-                        RoundedRectangle(cornerRadius: 2)
-                            .fill(Color(red: 0.78, green: 0.82, blue: 0.76).opacity(0.8))
-                            .frame(width: 4, height: 16)
-                        RoundedRectangle(cornerRadius: 2)
-                            .fill(Color(red: 0.78, green: 0.82, blue: 0.76).opacity(0.8))
-                            .frame(width: 4, height: 16)
-                    }
+                    Image(systemName: "forward.end.fill")
+                        .font(.system(size: 11))
+                        .foregroundColor(.espresso)
                 }
                 .buttonStyle(TransportBtnStyle())
+                .disabled(!playbackControls.canSkipForward)
+                .help("⌘→ — Next sentence")
             }
 
             // Waveform
-            WaveformView(playing: isPlaying, progress: $playbackProgress)
-                .frame(maxWidth: .infinity)
+            WaveformView(playing: isPlaying, progress: $playbackProgress, onSeek: { progress in
+                handleWaveformSeek(progress)
+            })
+            .frame(maxWidth: .infinity)
 
             // Time / chapter
             VStack(spacing: 1) {
@@ -778,31 +939,106 @@ struct ContentView: View {
 
     private func togglePlayback() {
         guard let loadedPDF else { return }
+        
+        // Check if we can resume from pause
+        let reader = selectedVoiceEngine == .kokoro ? kokoroReader : piperReader
+        if reader.isPaused {
+            // Resume from pause
+            reader.pauseOrContinue()
+            isPlaying = true
+            startContinuationPolling()
+            return
+        }
+        
         if isPlaying {
+            // Pause
             pausePlayback()
         } else {
+            // Fresh start
             startPlayback(for: loadedPDF)
         }
     }
 
     private func startPlayback(for pdf: LoadedPDF) {
-        let selection = activeProxy.currentSelectionText()?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let text: String
-        let hasSelection: Bool
-        if let selection, !selection.isEmpty {
-            text = selection
-            hasSelection = true
+        if let pdfSelection = activeProxy.currentSelection,
+           let selectionText = pdfSelection.string?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !selectionText.isEmpty {
+            // Selection mode: start with selection, then continue from where it ends
+            startFromSelection(pdfSelection, selectionText: selectionText, pdf: pdf)
         } else {
-            text = textToRead(from: pdf)
-            hasSelection = false
+            // No selection: start from current page and continue forward
+            startFromCurrentPage(pdf: pdf, currentPage: selectedPageID)
         }
-
-        if hasSelection {
-            // Selection active — read selected text directly.
-            // Bypass the voice plan; the plan covers the full document.
-            startEngine(text: text, rate: playbackSpeed)
-        } else if selectedPlaybackMode == .multiVoice {
+    }
+    
+    private func startFromSelection(_ pdfSelection: PDFSelection, selectionText: String, pdf: LoadedPDF) {
+        logger.notice("Play from selection pressed")
+        let startTime = CFAbsoluteTimeGetCurrent()
+        
+        // Get selection's ending page for lazy continuation
+        guard let document = pdfDocument,
+              let lastPage = pdfSelection.pages.last else {
+            errorMessage = "Could not determine selection position."
+            return
+        }
+        
+        let lastPageIndex = document.index(for: lastPage)
+        guard lastPageIndex != NSNotFound else {
+            errorMessage = "Selection page not found."
+            return
+        }
+        
+        // FAST STARTUP: Only segment selection + remainder of its page initially
+        let (restOfPage, _) = textAfterSelectionOnSamePage(pdfSelection, pageIndex: lastPageIndex, in: pdf)
+        let initialText = selectionText + (restOfPage.isEmpty ? "" : "\n\n" + restOfPage)
+        
+        // Store state for lazy continuation
+        lastPlayedPageIndex = lastPageIndex
+        documentForContinuation = pdf
+        
+        logger.log(level: .info, "Selection + rest of page extracted (\(initialText.count, privacy: .public) chars) in \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - startTime), privacy: .public)s")
+        
+        // Build segments for initial text only
+        let allSegments = buildSegments(for: initialText, pdf: pdf, startPage: nil)
+        currentChunks = allSegments
+        
+        logger.log(level: .info, "Segments built (\(allSegments.count, privacy: .public) segments) in \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - startTime), privacy: .public)s")
+        
+        switch selectedVoiceEngine {
+        case .kokoro:
+            kokoroReader.start(segments: allSegments, rate: playbackSpeed)
+            logger.log(level: .info, "Playback started in \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - startTime), privacy: .public)s")
+        case .piper:
+            piperReader.start(segments: allSegments, rate: playbackSpeed)
+            logger.log(level: .info, "Playback started in \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - startTime), privacy: .public)s")
+        }
+        
+        isPlaying = true
+        
+        // Background: start polling for page continuation
+        startContinuationPolling()
+    }
+    
+    private func startFromCurrentPage(pdf: LoadedPDF, currentPage: Int) {
+        logger.notice("Play pressed (page \(currentPage + 1, privacy: .public))")
+        let startTime = CFAbsoluteTimeGetCurrent()
+        
+        // FAST STARTUP: Only segment current page initially
+        // Background: append next pages during playback
+        let text = textFromPage(currentPage, through: currentPage, in: pdf)
+        
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            errorMessage = "No text to read from current page."
+            return
+        }
+        
+        // Store state for lazy continuation
+        lastPlayedPageIndex = currentPage
+        documentForContinuation = pdf
+        
+        logger.log(level: .info, "Text extracted (\(text.count, privacy: .public) chars) in \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - startTime), privacy: .public)s")
+        
+        if selectedPlaybackMode == .multiVoice {
             let pageNum: Int?
             if selectedReadMode == .pageByPage {
                 pageNum = selectedPageID + 1
@@ -817,25 +1053,133 @@ struct ContentView: View {
                 fallbackPolicy: speakerFallbackPolicy
             )
             if !kokoroReader.availability.isAvailable {
-                analysisMessage = "Kokoro is not ready. Using Piper fallback if a Piper model is installed."
+                errorHandler.handleVoiceEngineError(engine: .kokoro, availability: kokoroReader.availability) {
+                    // Fall back to Piper
+                    selectedVoiceEngine = .piper
+                    startEngine(text: text, rate: playbackSpeed)
+                }
+                return
             }
             selectedVoiceEngine = .kokoro
+            currentChunks = segments
+            let jobSentTime = CFAbsoluteTimeGetCurrent()
+            NSLog("[LatteTiming] Segments built (\(segments.count) segments) in \(String(format: "%.3f", jobSentTime - startTime))s")
             kokoroReader.start(segments: segments, rate: playbackSpeed)
+            NSLog("[LatteTiming] First job sent in \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - startTime))s")
         } else {
+            let jobSentTime = CFAbsoluteTimeGetCurrent()
+            NSLog("[LatteTiming] Single-voice mode, starting engine in \(String(format: "%.3f", jobSentTime - startTime))s")
             startEngine(text: text, rate: playbackSpeed)
+            NSLog("[LatteTiming] First job sent in \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - startTime))s")
         }
         isPlaying = true
+        
+        // Background: start polling for page continuation
+        startContinuationPolling()
+    }
+    
+    /// Get text from a range of pages
+    private func textFromPage(_ startPage: Int, through endPage: Int, in pdf: LoadedPDF) -> String {
+        let pageRange = startPage...endPage
+        return pdf.pages
+            .filter { pageRange.contains($0.id) }
+            .map { $0.text }
+            .joined(separator: "\n\n")
+    }
+    
+    /// Extract text after a selection on the same page only (for fast startup)
+    private func textAfterSelectionOnSamePage(_ selection: PDFSelection, pageIndex: Int, in pdf: LoadedPDF) -> (String, Bool) {
+        guard let document = pdfDocument,
+              let lastPage = selection.pages.last,
+              let pageText = lastPage.string else {
+            return ("", false)
+        }
+        
+        let selectionText = selection.string ?? ""
+        if let range = pageText.range(of: selectionText, options: [.caseInsensitive, .diacriticInsensitive]) {
+            let afterSelection = String(pageText[range.upperBound...])
+            return (afterSelection, true)
+        }
+        
+        return ("", false)
+    }
+    
+    /// Extract text after a selection: remainder of selection's last page + following pages (unused, for reference)
+    private func textAfterSelection(_ selection: PDFSelection, in pdf: LoadedPDF) -> (String, Bool) {
+        guard let document = pdfDocument,
+              let lastPage = selection.pages.last else {
+            return ("", false)
+        }
+        
+        let lastPageIndex = document.index(for: lastPage)
+        guard lastPageIndex != NSNotFound else {
+            return ("", false)
+        }
+        
+        // Get full text of the last page where selection ends
+        guard let pageText = lastPage.string else {
+            // No text on this page, continue from next page
+            return (textFromPage(lastPageIndex + 1, through: pdf.pageCount - 1, in: pdf), true)
+        }
+        
+        // Find where the selection ends on this page
+        // We'll use a heuristic: find the selection text in the page text
+        let selectionText = selection.string ?? ""
+        if let range = pageText.range(of: selectionText, options: [.caseInsensitive, .diacriticInsensitive]) {
+            // Get text after the selection on the same page
+            let afterSelection = String(pageText[range.upperBound...])
+            
+            // Get text from subsequent pages
+            let followingPages = textFromPage(lastPageIndex + 1, through: pdf.pageCount - 1, in: pdf)
+            
+            // Combine: rest of current page + following pages
+            if !afterSelection.isEmpty && !followingPages.isEmpty {
+                return (afterSelection + "\n\n" + followingPages, true)
+            } else if !afterSelection.isEmpty {
+                return (afterSelection, true)
+            } else {
+                return (followingPages, true)
+            }
+        } else {
+            // Couldn't find selection in page text, continue from next page
+            return (textFromPage(lastPageIndex + 1, through: pdf.pageCount - 1, in: pdf), true)
+        }
+    }
+    
+    /// Build segments using the same voice logic as existing playback
+    private func buildSegments(for text: String, pdf: LoadedPDF, startPage: Int?) -> [PlannedSpeechSegment] {
+        if selectedPlaybackMode == .multiVoice {
+            let segments = MultiVoiceAnalyzer().playbackSegments(
+                for: text,
+                pageNumber: startPage,
+                using: voicePlan,
+                defaultVoiceIdentifier: nil,
+                fallbackPolicy: speakerFallbackPolicy
+            )
+            return segments
+        } else {
+            // Single voice mode - use the user's selected voice
+            switch selectedVoiceEngine {
+            case .kokoro:
+                return makeSegments(for: text, kokoroVoiceID: "af_heart")
+            case .piper:
+                return makeSegments(for: text, kokoroVoiceID: nil)
+            }
+        }
     }
 
     /// Route playback to the engine the user selected.
     private func startEngine(text: String, rate: Double) {
         switch selectedVoiceEngine {
         case .kokoro:
-            let segments = makeSegments(for: text, kokoroVoiceID: "af_heart")
-            kokoroReader.start(segments: segments, rate: rate)
+            // Ramped segments: ~150, ~250, then ~350 chars
+            let allSegments = makeSegmentsWithRampedStart(for: text, kokoroVoiceID: "af_heart")
+            currentChunks = allSegments
+            kokoroReader.start(segments: allSegments, rate: rate)
         case .piper:
-            let segments = makeSegments(for: text, kokoroVoiceID: nil)
-            piperReader.start(segments: segments, rate: rate)
+            let allSegments = makeSegmentsWithRampedStart(for: text, kokoroVoiceID: nil)
+            currentChunks = allSegments
+            piperReader.start(segments: allSegments, rate: rate)
         }
     }
 
@@ -849,6 +1193,12 @@ struct ContentView: View {
             return
         }
         NSLog("⌘⌥Q: selection='\(selection.prefix(80))' (\(selection.count) chars)")
+        
+        // Add to queue UI
+        let id = UUID()
+        let preview = String(selection.prefix(60)) + (selection.count > 60 ? "..." : "")
+        queuedItems.append((id: id, text: selection, preview: preview))
+        
         let count: Int
         switch selectedVoiceEngine {
         case .kokoro:
@@ -858,28 +1208,113 @@ struct ContentView: View {
             piperReader.append(segments: makeSegments(for: selection, kokoroVoiceID: nil))
             count = piperReader.totalChunks
         }
-        analysisMessage = "Queued selection — \(count) total chunk(s)"
-        queueStatus = "✓ Queued — \(count) chunk(s)"
+        
+        // Show queue status
+        queueStatus = "✓ Queued +\(queuedItems.count) — \(count) total chunk(s)"
+        
         // Auto-clear the toast after 4 seconds
         let clearJob = DispatchWorkItem { [self] in
             if queueStatus?.hasPrefix("✓") == true { queueStatus = nil }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 4, execute: clearJob)
     }
+    
+    private func clearQueue() {
+        queuedItems.removeAll()
+        stopPlayback()
+        queueStatus = nil
+    }
 
     /// Build narration segments from raw text.
+    /// Returns (firstSegment, secondSegment, remainderSegments) for ramped startup.
+    /// First ~150 chars, second ~250 chars, rest ~350 chars.
+    private func makeSegmentsWithRampedStart(for text: String, kokoroVoiceID: String?) -> [PlannedSpeechSegment] {
+        guard !text.isEmpty else { return [] }
+        
+        // Extract first sentence or ~150 chars at word boundary
+        let (firstText, afterFirst) = extractSegment(from: text, maxLength: 150)
+        guard !afterFirst.isEmpty else {
+            return [makeSingleSegment(text: firstText, kokoroVoiceID: kokoroVoiceID)]
+        }
+        
+        // Extract second segment ~250 chars
+        let (secondText, afterSecond) = extractSegment(from: afterFirst, maxLength: 250)
+        guard !afterSecond.isEmpty else {
+            return [
+                makeSingleSegment(text: firstText, kokoroVoiceID: kokoroVoiceID),
+                makeSingleSegment(text: secondText, kokoroVoiceID: kokoroVoiceID)
+            ]
+        }
+        
+        // Chunk remainder at 350 chars
+        let restSegments = MultiVoiceAnalyzer.chunk(text: afterSecond, maxLength: AppConfig.chunkMaxLength).map {
+            makeSingleSegment(text: $0, kokoroVoiceID: kokoroVoiceID)
+        }
+        
+        return [
+            makeSingleSegment(text: firstText, kokoroVoiceID: kokoroVoiceID),
+            makeSingleSegment(text: secondText, kokoroVoiceID: kokoroVoiceID)
+        ] + restSegments
+    }
+    
+    private func extractSegment(from text: String, maxLength: Int) -> (segment: String, remainder: String) {
+        var endIndex = text.startIndex
+        var foundSentenceEnd = false
+        
+        // Find first sentence boundary, avoiding "Mr.", "Dr.", "3.5"
+        var i = text.startIndex
+        while i < text.endIndex {
+            let char = text[i]
+            if char == "." || char == "!" || char == "?" {
+                let nextIndex = text.index(after: i)
+                // Check if it's end of sentence (followed by space/newline/end, not lowercase)
+                if nextIndex >= text.endIndex || text[nextIndex].isWhitespace || text[nextIndex].isUppercase {
+                    endIndex = nextIndex
+                    foundSentenceEnd = true
+                    break
+                }
+            }
+            i = text.index(after: i)
+        }
+        
+        // If no sentence boundary or too long, take maxLength chars at word boundary
+        if !foundSentenceEnd || text.distance(from: text.startIndex, to: endIndex) > maxLength + 50 {
+            let target = text.index(text.startIndex, offsetBy: min(maxLength, text.count), limitedBy: text.endIndex) ?? text.endIndex
+            // Find word boundary before target
+            endIndex = text[..<target].lastIndex(where: { $0.isWhitespace }) ?? target
+        }
+        
+        let segmentText = String(text[..<endIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let remainderText = String(text[endIndex...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        return (segmentText, remainderText)
+    }
+    
+    private func makeSingleSegment(text: String, kokoroVoiceID: String?) -> PlannedSpeechSegment {
+        return PlannedSpeechSegment(
+            text: text,
+            voiceIdentifier: nil,
+            kokoroVoiceID: kokoroVoiceID,
+            piperModelPath: MultiVoiceAnalyzer.availablePiperModels().first,
+            speakerName: "Narrator"
+        )
+    }
+    
     private func makeSegments(for text: String, kokoroVoiceID: String?) -> [PlannedSpeechSegment] {
-        MultiVoiceAnalyzer.chunk(text: text).map {
+        return MultiVoiceAnalyzer.chunk(text: text, maxLength: AppConfig.chunkMaxLength).map {
             PlannedSpeechSegment(text: $0, voiceIdentifier: nil, kokoroVoiceID: kokoroVoiceID, piperModelPath: MultiVoiceAnalyzer.availablePiperModels().first, speakerName: "Narrator")
         }
     }
 
     private func pausePlayback() {
-        switch selectedVoiceEngine {
-        case .kokoro: kokoroReader.pauseOrContinue()
-        case .piper: piperReader.pauseOrContinue()
+        let reader = selectedVoiceEngine == .kokoro ? kokoroReader : piperReader
+        reader.pauseOrContinue()
+        isPlaying = !reader.isPaused
+        pausedPageIndex = selectedPageID
+        if !isPlaying {
+            stopContinuationPolling()
         }
-        isPlaying = selectedVoiceEngine == .kokoro ? kokoroReader.isSpeaking : piperReader.isSpeaking
+        speechHighlighter.clearHighlight()
     }
 
     private func stopPlayback() {
@@ -889,6 +1324,123 @@ struct ContentView: View {
         }
         isPlaying = false
         playbackProgress = 0
+        speechHighlighter.clearHighlight()
+        currentChunks = []
+        stopContinuationPolling()
+    }
+    
+    private func startContinuationPolling() {
+        stopContinuationPolling()
+        continuationTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
+            self.appendNextPageIfNeeded()
+        }
+    }
+    
+    private func stopContinuationPolling() {
+        continuationTimer?.invalidate()
+        continuationTimer = nil
+    }
+    
+    /// Append the next page when playback approaches the end of current segments
+    private func appendNextPageIfNeeded() {
+        guard isPlaying,
+              let pdf = documentForContinuation,
+              let lastPage = lastPlayedPageIndex,
+              lastPage + 1 < pdf.pageCount else {
+            return
+        }
+        
+        // Check if we're near the end of current segments (last 4 chunks for smoother transition)
+        let currentChunkIndex: Int
+        let totalChunks: Int
+        
+        switch selectedVoiceEngine {
+        case .kokoro:
+            currentChunkIndex = kokoroReader.currentChunkIndex
+            totalChunks = kokoroReader.totalChunks
+        case .piper:
+            currentChunkIndex = piperReader.currentChunkIndex
+            totalChunks = piperReader.totalChunks
+        }
+        
+        // Append next page earlier (when 4 chunks remaining) to avoid gaps
+        guard totalChunks - currentChunkIndex <= 4 else {
+            return
+        }
+        
+        logger.notice("Appending page \(lastPage + 2, privacy: .public) lazily (chunk \(currentChunkIndex + 1, privacy: .public)/\(totalChunks, privacy: .public))")
+        let nextPageStartTime = CFAbsoluteTimeGetCurrent()
+        
+        // Get next page text
+        let nextPageText = textFromPage(lastPage + 1, through: lastPage + 1, in: pdf)
+        guard !nextPageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            // Page is empty, try next one
+            lastPlayedPageIndex = lastPage + 1
+            return
+        }
+        
+        logger.log(level: .info, "Next page text extracted (\(nextPageText.count, privacy: .public) chars) in \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - nextPageStartTime), privacy: .public)s")
+        
+        // Build segments for next page
+        let segments = buildSegments(for: nextPageText, pdf: pdf, startPage: lastPage + 1)
+        
+        logger.log(level: .info, "Next page segments built (\(segments.count, privacy: .public) segments) in \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - nextPageStartTime), privacy: .public)s")
+        
+        // Append to engine
+        switch selectedVoiceEngine {
+        case .kokoro:
+            kokoroReader.append(segments: segments)
+        case .piper:
+            piperReader.append(segments: segments)
+        }
+        
+        logger.log(level: .info, "Next page appended in \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - nextPageStartTime), privacy: .public)s")
+        
+        // Update last played page
+        lastPlayedPageIndex = lastPage + 1
+    }
+    
+    private func handleWaveformSeek(_ progress: Double) {
+        let reader = selectedVoiceEngine == .kokoro ? kokoroReader : piperReader
+        let targetTime = progress * reader.duration
+        reader.seek(to: targetTime)
+        playbackProgress = progress
+    }
+    
+    // MARK: - Highlighting
+    
+    private func updateHighlightForKokoro() {
+        guard let loadedPDF else { return }
+        let index = kokoroReader.currentChunkIndex
+        guard index < currentChunks.count else { return }
+        
+        let chunk = currentChunks[index]
+        let approximatePage = speechHighlighter.approximatePageForChunk(
+            index: index,
+            chunks: currentChunks,
+            pdfPageTexts: loadedPDF.pages
+        )
+        
+        highlightCurrentChunk(chunk.text, approximatePage: approximatePage)
+    }
+    
+    private func updateHighlightForPiper() {
+        guard let loadedPDF else { return }
+        let index = piperReader.currentChunkIndex
+        guard index < currentChunks.count else { return }
+        
+        let chunk = currentChunks[index]
+        let approximatePage = speechHighlighter.approximatePageForChunk(
+            index: index,
+            chunks: currentChunks,
+            pdfPageTexts: loadedPDF.pages
+        )
+        
+        highlightCurrentChunk(chunk.text, approximatePage: approximatePage)
+    }
+    
+    private func highlightCurrentChunk(_ text: String, approximatePage: Int?) {
+        speechHighlighter.highlightChunk(text, searchFrom: approximatePage)
     }
 
     private var elapsedString: String {
@@ -973,10 +1525,14 @@ struct ContentView: View {
 
             guard let document = PDFDocument(url: url) else {
                 if canAccess { url.stopAccessingSecurityScopedResource() }
-                throw PDFReaderError.cannotOpen
+                errorHandler.handlePDFError(.cannotOpen)
+                return
             }
             pdfDocument = document
             errorMessage = nil
+            
+            // Set up highlighter with document
+            speechHighlighter.setPDFDocument(document, view: nil)
 
             let pageCount = document.pageCount
             let placeholderPages = (0..<pageCount).map {
@@ -1007,10 +1563,16 @@ struct ContentView: View {
                             analysisMessage = "Restored saved voice plan."
                         }
                         isParsingText = false
+                        // Set document text for highlighter
+                        speechHighlighter.setDocumentText(pdf.fullText)
                     }
                 } catch {
                     await MainActor.run {
-                        errorMessage = "Text extraction: \(error.localizedDescription)"
+                        if let pdfError = error as? PDFReaderError {
+                            errorHandler.handlePDFError(pdfError)
+                        } else {
+                            errorMessage = "Text extraction: \(error.localizedDescription)"
+                        }
                         isParsingText = false
                     }
                 }
@@ -1019,7 +1581,11 @@ struct ContentView: View {
             loadedPDF = nil
             pdfDocument = nil
             isParsingText = false
-            errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            if let pdfError = error as? PDFReaderError {
+                errorHandler.handlePDFError(pdfError)
+            } else {
+                errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            }
         }
     }
 

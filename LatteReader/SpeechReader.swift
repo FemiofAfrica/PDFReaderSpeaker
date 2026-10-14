@@ -35,7 +35,7 @@ final class SpeechReader: NSObject, ObservableObject, SpeechEngine {
         stop()
         selectedRate = Float(rate)
         selectedVoiceIdentifier = voiceIdentifier
-        chunks = MultiVoiceAnalyzer.chunk(text: text).map {
+        chunks = MultiVoiceAnalyzer.chunk(text: text, maxLength: AppConfig.chunkMaxLength).map {
             PlannedSpeechSegment(text: $0, voiceIdentifier: voiceIdentifier, kokoroVoiceID: nil, piperModelPath: nil, speakerName: "Narrator")
         }
         totalChunks = chunks.count

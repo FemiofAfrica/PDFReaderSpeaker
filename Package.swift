@@ -29,5 +29,10 @@ let package = Package(
             dependencies: ["PagePromptSupport"],
             path: "Tests/PagePromptSupportTests"
         ),
+        .testTarget(
+            name: "LatteReaderTests",
+            dependencies: ["LatteReader"],
+            path: "Tests/LatteReaderTests"
+        ),
     ]
 )
